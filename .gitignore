@@ -1,0 +1,11 @@
+.env
+backend/.env
+
+node_modules/
+.next/
+
+__pycache__/
+*.pyc
+
+jeevanmarg.db
+*.db

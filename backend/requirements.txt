@@ -1,0 +1,31 @@
+# FastAPI & Server
+fastapi>=0.115.6
+uvicorn[standard]>=0.34.0
+python-multipart>=0.0.20
+websockets>=15.0.1
+
+# Database
+sqlalchemy>=2.0.36
+aiosqlite>=0.20.0
+
+# Authentication
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+bcrypt>=4.2.1
+
+# Validation & Config
+pydantic>=2.10.4
+pydantic-settings>=2.7.1
+
+# Security
+slowapi>=0.1.9
+
+# Google ADK
+google-adk>=1.5.0
+
+# MCP
+fastmcp>=2.8.0
+
+# Utilities
+python-dotenv>=1.1.0
+httpx>=0.28.1

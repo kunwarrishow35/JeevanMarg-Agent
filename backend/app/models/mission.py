@@ -1,0 +1,147 @@
+"""Mission and related models for agent orchestration tracking."""
+
+import enum
+from datetime import datetime, timezone
+
+from sqlalchemy import Column, Integer, String, Float, DateTime, Enum, Text, ForeignKey, JSON
+
+from app.database import Base
+
+
+class MissionStatus(str, enum.Enum):
+    """Mission lifecycle states."""
+    CREATED = "created"
+    RUNNING = "running"
+    ANALYZING = "analyzing"
+    DEGRADED = "degraded"
+    RECOVERING = "recovering"
+    AWAITING_APPROVAL = "awaiting_approval"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class AgentState(str, enum.Enum):
+    """Agent execution states."""
+    IDLE = "idle"
+    RUNNING = "running"
+    WAITING = "waiting"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ApprovalStatus(str, enum.Enum):
+    """Approval states for human-in-the-loop."""
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class Mission(Base):
+    """Emergency corridor mission."""
+
+    __tablename__ = "missions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mission_code = Column(String(20), unique=True, nullable=False, index=True)
+    status = Column(Enum(MissionStatus), nullable=False, default=MissionStatus.CREATED)
+
+    # Location
+    origin_name = Column(String(200), nullable=False)
+    origin_lat = Column(Float, nullable=False)
+    origin_lng = Column(Float, nullable=False)
+    destination_name = Column(String(200), nullable=False)
+    destination_lat = Column(Float, nullable=False)
+    destination_lng = Column(Float, nullable=False)
+
+    # Trust Score
+    trust_score = Column(Float, nullable=True)
+    trust_level = Column(String(20), nullable=True)  # excellent/healthy/warning/critical
+    corridor_health = Column(Float, nullable=True)
+    eta_confidence = Column(Float, nullable=True)
+    eta_minutes = Column(Float, nullable=True)
+
+    # Trust Score Factors
+    congestion_factor = Column(Float, nullable=True)
+    route_stability_factor = Column(Float, nullable=True)
+    traffic_volatility_factor = Column(Float, nullable=True)
+    corridor_continuity_factor = Column(Float, nullable=True)
+    eta_confidence_factor = Column(Float, nullable=True)
+
+    # Scenario
+    scenario = Column(String(20), nullable=True)  # healthy/degraded/recovered
+
+    # Metadata
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                        onupdate=lambda: datetime.now(timezone.utc))
+
+
+class AgentActivity(Base):
+    """Log of agent actions during a mission."""
+
+    __tablename__ = "agent_activities"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mission_id = Column(Integer, ForeignKey("missions.id"), nullable=False, index=True)
+    agent_name = Column(String(50), nullable=False)
+    agent_state = Column(Enum(AgentState), nullable=False, default=AgentState.RUNNING)
+    action = Column(String(200), nullable=False)
+    result = Column(Text, nullable=True)
+    reasoning = Column(Text, nullable=True)
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class MCPCall(Base):
+    """Log of MCP tool calls made by agents."""
+
+    __tablename__ = "mcp_calls"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mission_id = Column(Integer, ForeignKey("missions.id"), nullable=False, index=True)
+    server_name = Column(String(50), nullable=False)  # traffic/route/hospital/trust
+    tool_name = Column(String(100), nullable=False)
+    request_payload = Column(JSON, nullable=True)
+    response_payload = Column(JSON, nullable=True)
+    latency_ms = Column(Integer, nullable=True)
+    status = Column(String(20), default="success")  # success/error
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class Approval(Base):
+    """Human-in-the-loop approval requests."""
+
+    __tablename__ = "approvals"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mission_id = Column(Integer, ForeignKey("missions.id"), nullable=False, index=True)
+    approval_type = Column(String(50), nullable=False)  # route_change/recovery_plan
+    title = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    recommendation = Column(JSON, nullable=True)  # structured recommendation data
+    ai_explanation = Column(Text, nullable=True)
+    trust_score_before = Column(Float, nullable=True)
+    trust_score_after = Column(Float, nullable=True)
+    eta_before = Column(Float, nullable=True)
+    eta_after = Column(Float, nullable=True)
+    status = Column(Enum(ApprovalStatus), nullable=False, default=ApprovalStatus.PENDING)
+    reviewed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class RouteData(Base):
+    """Route data generated by Route MCP."""
+
+    __tablename__ = "route_data"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mission_id = Column(Integer, ForeignKey("missions.id"), nullable=False, index=True)
+    route_type = Column(String(20), nullable=False)  # primary/alternative
+    route_name = Column(String(200), nullable=True)
+    waypoints = Column(JSON, nullable=False)  # list of [lat, lng] pairs
+    segments = Column(JSON, nullable=True)  # segment metadata
+    distance_km = Column(Float, nullable=True)
+    eta_minutes = Column(Float, nullable=True)
+    is_active = Column(Integer, default=1)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
