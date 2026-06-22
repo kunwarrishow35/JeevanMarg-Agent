@@ -10,6 +10,7 @@ import type {
   RouteDataResponse,
   AgentStatusResponse,
   MCPServerStatusResponse,
+  IncidentResponse,
   WSEvent,
 } from '@/lib/api';
 
@@ -64,6 +65,7 @@ interface MissionState {
   routes: RouteDataResponse[];
   agentStates: AgentStatusResponse[];
   mcpServerStates: MCPServerStatusResponse[];
+  incidents: IncidentResponse[];
   systemStatus: string;
   isRunning: boolean;
   trustScore: number | null;
@@ -85,6 +87,9 @@ interface MissionState {
   addRoute: (route: RouteDataResponse) => void;
   setAgentStates: (states: AgentStatusResponse[]) => void;
   setMCPServerStates: (states: MCPServerStatusResponse[]) => void;
+  setIncidents: (incidents: IncidentResponse[]) => void;
+  addIncident: (incident: IncidentResponse) => void;
+  resolveIncident: (id: number) => void;
   setSystemStatus: (status: string) => void;
   setIsRunning: (running: boolean) => void;
   updateTrustScore: (score: number, level: string, health: number, confidence: number, factors: Record<string, number>) => void;
@@ -101,6 +106,7 @@ export const useMissionStore = create<MissionState>((set, get) => ({
   routes: [],
   agentStates: [],
   mcpServerStates: [],
+  incidents: [],
   systemStatus: 'online',
   isRunning: false,
   trustScore: null,
@@ -127,6 +133,14 @@ export const useMissionStore = create<MissionState>((set, get) => ({
   addRoute: (route) => set((s) => ({ routes: [...s.routes, route] })),
   setAgentStates: (states) => set({ agentStates: states }),
   setMCPServerStates: (states) => set({ mcpServerStates: states }),
+  setIncidents: (incidents) => set({ incidents }),
+  addIncident: (incident) => set((s) => ({ incidents: [...s.incidents, incident] })),
+  resolveIncident: (id) =>
+    set((s) => ({
+      incidents: s.incidents.map((i) =>
+        i.id === id ? { ...i, status: 'resolved' } : i
+      ),
+    })),
   setSystemStatus: (status) => set({ systemStatus: status }),
   setIsRunning: (running) => set({ isRunning: running }),
   updateTrustScore: (score, level, health, confidence, factors) =>
@@ -279,6 +293,37 @@ export const useMissionStore = create<MissionState>((set, get) => ({
         }));
         break;
 
+      case 'incident_created':
+        if (event.incident) {
+          set((s) => ({
+            incidents: [...s.incidents, event.incident as IncidentResponse],
+            activities: [
+              ...s.activities,
+              {
+                id: Date.now(),
+                mission_id: event.mission_id || 0,
+                agent_name: 'system',
+                agent_state: 'running',
+                action: `🚨 Incident: ${(event.incident as IncidentResponse).incident_type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}`,
+                result: `${(event.incident as IncidentResponse).description}`,
+                reasoning: `${(event.incident as IncidentResponse).severity.toUpperCase()} severity at ${(event.incident as IncidentResponse).location_name}. Estimated delay: +${(event.incident as IncidentResponse).estimated_delay_minutes} minutes.`,
+                timestamp: now,
+              },
+            ],
+          }));
+        }
+        break;
+
+      case 'incident_resolved':
+        if (event.incident_id) {
+          set((s) => ({
+            incidents: s.incidents.map((i) =>
+              i.id === event.incident_id ? { ...i, status: 'resolved' } : i
+            ),
+          }));
+        }
+        break;
+
       case 'mission_completed':
         set({ isRunning: false });
         if (state.currentMission) {
@@ -314,6 +359,7 @@ export const useMissionStore = create<MissionState>((set, get) => ({
       mcpCalls: [],
       approvals: [],
       routes: [],
+      incidents: [],
       isRunning: false,
       trustScore: null,
       trustLevel: null,

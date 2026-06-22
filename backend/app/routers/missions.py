@@ -111,6 +111,7 @@ async def start_mission(
         mission_id=mission.id,
         origin={"name": mission.origin_name, "lat": mission.origin_lat, "lng": mission.origin_lng},
         destination={"name": mission.destination_name, "lat": mission.destination_lat, "lng": mission.destination_lng},
+        scenario_sequence=["healthy"],
     )
 
     return {"status": "started", "mission_id": mission.id, "message": "Agent orchestration started"}
@@ -164,7 +165,12 @@ async def get_mission_routes(
     return [RouteDataResponse.model_validate(r) for r in routes]
 
 
-async def _run_mission_background(mission_id: int, origin: dict, destination: dict) -> None:
+async def _run_mission_background(
+    mission_id: int,
+    origin: dict,
+    destination: dict,
+    scenario_sequence: list[str] = None,
+) -> None:
     """Background task that runs the agent orchestration."""
     from app.config import settings
     from agents.orchestrator import MissionOrchestrator
@@ -307,34 +313,49 @@ async def _run_mission_background(mission_id: int, origin: dict, destination: di
                             event_db.add(route)
                             await event_db.commit()
 
+                # Broadcast via WebSocket after persisting to DB to avoid races
+                await ws_manager.broadcast_to_mission(mission_id, event)
+
             orchestrator.set_event_callback(handle_event)
 
             # Store primary route first
+            if scenario_sequence is None:
+                scenario_sequence = ["healthy", "degraded"]
+
             # Run mission orchestration
             results = await orchestrator.run_mission(
                 mission_id=mission_id,
                 origin=origin,
                 destination=destination,
-                scenario_sequence=["healthy", "degraded"],
+                scenario_sequence=scenario_sequence,
             )
 
             # Store primary route
-            healthy_result = results.get("healthy", {})
-            route_data = healthy_result.get("route", {})
-            if route_data.get("waypoints"):
-                async with async_session_factory() as route_db:
-                    route = RouteData(
-                        mission_id=mission_id,
-                        route_type="primary",
-                        route_name=route_data.get("route_name", "Primary Route"),
-                        waypoints=route_data.get("waypoints", []),
-                        segments=route_data.get("segments"),
-                        distance_km=route_data.get("distance_km"),
-                        eta_minutes=route_data.get("eta", {}).get("eta_minutes"),
-                        is_active=1,
-                    )
-                    route_db.add(route)
-                    await route_db.commit()
+            if "healthy" in scenario_sequence:
+                healthy_result = results.get("healthy", {})
+                route_data = healthy_result.get("route", {})
+                if route_data.get("waypoints"):
+                    async with async_session_factory() as route_db:
+                        route = RouteData(
+                            mission_id=mission_id,
+                            route_type="primary",
+                            route_name=route_data.get("route_name", "Primary Route"),
+                            waypoints=route_data.get("waypoints", []),
+                            segments=route_data.get("segments"),
+                            distance_km=route_data.get("distance_km"),
+                            eta_minutes=route_data.get("eta", {}).get("eta_minutes"),
+                            is_active=1,
+                        )
+                        route_db.add(route)
+                        await route_db.commit()
+
+                    # Broadcast route_generated event after successful persist to DB
+                    await ws_manager.broadcast_to_mission(mission_id, {
+                        "type": "route_generated",
+                        "mission_id": mission_id,
+                        "route_type": "primary",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
 
             # Update final mission status
             async with async_session_factory() as final_db:
@@ -342,16 +363,22 @@ async def _run_mission_background(mission_id: int, origin: dict, destination: di
                     select(Mission).where(Mission.id == mission_id)
                 )
                 m = result.scalar_one_or_none()
-                if m and m.status == MissionStatus.RUNNING:
+                if m and m.status == MissionStatus.RUNNING and "degraded" in scenario_sequence:
                     m.status = MissionStatus.COMPLETED
                     await final_db.commit()
 
-            # Send mission completed event
-            await ws_manager.broadcast_to_mission(mission_id, {
-                "type": "mission_completed",
-                "mission_id": mission_id,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
+            # Send mission completed event only if status is COMPLETED
+            async with async_session_factory() as final_db:
+                result = await final_db.execute(
+                    select(Mission).where(Mission.id == mission_id)
+                )
+                m = result.scalar_one_or_none()
+                if m and m.status == MissionStatus.COMPLETED:
+                    await ws_manager.broadcast_to_mission(mission_id, {
+                        "type": "mission_completed",
+                        "mission_id": mission_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
 
             logger.info(f"Mission {mission_id} orchestration completed")
 

@@ -118,6 +118,30 @@ export interface RouteDataResponse {
   created_at: string | null;
 }
 
+// --- Incident ---
+export interface IncidentResponse {
+  id: number;
+  mission_id: number | null;
+  incident_type: string;
+  severity: string;
+  status: string;
+  location_name: string;
+  location_lat: number;
+  location_lng: number;
+  segment_id: string | null;
+  segment_name: string | null;
+  affected_lanes: number | null;
+  total_lanes: number | null;
+  estimated_delay_minutes: number | null;
+  speed_before_kmh: number | null;
+  speed_after_kmh: number | null;
+  congestion_before: number | null;
+  congestion_after: number | null;
+  description: string | null;
+  created_at: string | null;
+  resolved_at: string | null;
+}
+
 // --- System Health ---
 export interface AgentStatusResponse {
   name: string;
@@ -178,6 +202,9 @@ export interface WSEvent {
   eta_after?: number;
   approval_id?: number;
   error?: string;
+  // Incident events
+  incident?: IncidentResponse;
+  incident_id?: number;
 }
 
 // ---- API Helpers ----
@@ -269,6 +296,37 @@ export const approvalApi = {
 
   reject: (id: number) =>
     apiFetch<ApprovalResponse>(`/api/v1/approvals/${id}/reject`, {
+      method: 'POST',
+    }),
+};
+
+// ---- Incident API ----
+
+export const incidentApi = {
+  simulate: (incidentType: string, missionId?: number) =>
+    apiFetch<IncidentResponse>('/api/v1/incidents/simulate', {
+      method: 'POST',
+      body: JSON.stringify({
+        incident_type: incidentType,
+        mission_id: missionId || null,
+      }),
+    }),
+
+  list: (statusFilter?: string, missionId?: number) => {
+    const params = new URLSearchParams();
+    if (statusFilter) params.set('status_filter', statusFilter);
+    if (missionId) params.set('mission_id', String(missionId));
+    const qs = params.toString();
+    return apiFetch<{ incidents: IncidentResponse[]; total: number }>(
+      `/api/v1/incidents${qs ? `?${qs}` : ''}`
+    );
+  },
+
+  get: (id: number) =>
+    apiFetch<IncidentResponse>(`/api/v1/incidents/${id}`),
+
+  resolve: (id: number) =>
+    apiFetch<IncidentResponse>(`/api/v1/incidents/${id}/resolve`, {
       method: 'POST',
     }),
 };

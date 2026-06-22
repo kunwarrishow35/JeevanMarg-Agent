@@ -1,4 +1,4 @@
-"""Simulated traffic data generator for Delhi NCR."""
+"""Simulated traffic data generator — incident-aware."""
 
 import random
 import math
@@ -11,6 +11,9 @@ _SEGMENT_PROFILES: dict[str, dict] = {}
 
 # Scenario overrides
 _active_scenario: Optional[str] = None
+
+# Active incidents affecting traffic
+_active_incidents: list[dict] = []
 
 
 def set_traffic_scenario(scenario: str) -> None:
@@ -26,6 +29,31 @@ def set_traffic_scenario(scenario: str) -> None:
 def get_traffic_scenario() -> Optional[str]:
     """Get the current traffic scenario."""
     return _active_scenario
+
+
+def add_incident(incident: dict) -> None:
+    """Add an active incident that affects traffic.
+
+    Args:
+        incident: dict with keys: id, type, segment_id, severity,
+                  congestion, speed_kmh, affected_lanes, total_lanes
+    """
+    _active_incidents.append(incident)
+    # Also set scenario to degraded when incidents are added
+    global _active_scenario
+    _active_scenario = "degraded"
+
+
+def clear_incidents() -> None:
+    """Clear all active incidents and restore healthy scenario."""
+    global _active_scenario
+    _active_incidents.clear()
+    _active_scenario = "healthy"
+
+
+def get_active_incidents() -> list[dict]:
+    """Get all active incidents."""
+    return list(_active_incidents)
 
 
 def get_traffic_status_data(route_segments: list[dict]) -> dict:
@@ -58,6 +86,18 @@ def get_traffic_status_data(route_segments: list[dict]) -> dict:
     else:
         overall_status = "severe"
 
+    # Find incident-affected segments
+    incident_segments = []
+    for inc in _active_incidents:
+        for seg_status in segment_statuses:
+            if seg_status["segment_id"] == inc.get("segment_id"):
+                incident_segments.append({
+                    "segment_id": seg_status["segment_id"],
+                    "segment_name": seg_status["segment_name"],
+                    "incident_type": inc.get("type"),
+                    "incident_severity": inc.get("severity"),
+                })
+
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "overall_status": overall_status,
@@ -69,6 +109,7 @@ def get_traffic_status_data(route_segments: list[dict]) -> dict:
             "worst_segment": max(segment_statuses, key=lambda s: s["congestion_level"])["segment_id"]
             if segment_statuses else None,
         },
+        "active_incidents": incident_segments,
     }
 
 
@@ -83,7 +124,34 @@ def get_congestion_risk_data(lat: float, lng: float, radius_km: float = 2.0) -> 
     Returns:
         Congestion risk assessment.
     """
-    # Use scenario to determine risk
+    # Check for active incidents first
+    if _active_incidents:
+        risk_level = random.uniform(0.6, 0.85)
+        risk_category = "high"
+        incidents = []
+        for inc in _active_incidents:
+            incidents.append({
+                "type": inc.get("type", "unknown"),
+                "severity": inc.get("severity", "high"),
+                "description": f"{inc.get('type', 'Incident').replace('_', ' ').title()} affecting {inc.get('segment_id', 'corridor')}",
+                "lat": lat + random.uniform(-0.005, 0.005),
+                "lng": lng + random.uniform(-0.005, 0.005),
+                "impact_radius_km": 1.5,
+                "estimated_clearance_minutes": 45,
+                "affected_lanes": inc.get("affected_lanes", 2),
+                "total_lanes": inc.get("total_lanes", 4),
+            })
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "center": {"lat": lat, "lng": lng},
+            "radius_km": radius_km,
+            "risk_level": round(risk_level, 3),
+            "risk_category": risk_category,
+            "incidents": incidents,
+            "historical_pattern": "congestion prone",
+        }
+
+    # Fall back to scenario-based assessment
     if _active_scenario == "degraded":
         risk_level = random.uniform(0.6, 0.85)
         risk_category = "high"
@@ -128,11 +196,23 @@ def get_segment_speed_data(segment_id: str) -> dict:
     Returns:
         Speed and flow data for the segment.
     """
+    # Check if any incident targets this segment
+    incident_match = None
+    for inc in _active_incidents:
+        if inc.get("segment_id") == segment_id:
+            incident_match = inc
+            break
+
     # Base speed by segment type
     base_speed = 45.0  # km/h default
 
-    if _active_scenario == "degraded" and segment_id in ("seg_04", "seg_05"):
-        # These are the congested segments in degraded scenario
+    if incident_match:
+        # Incident directly affecting this segment
+        current_speed = incident_match.get("speed_kmh", random.uniform(8, 15))
+        flow_status = "stop_and_go"
+        congestion = incident_match.get("congestion", random.uniform(0.7, 0.9))
+    elif _active_scenario == "degraded" and segment_id in ("seg_04", "seg_05"):
+        # Legacy degraded scenario segments
         current_speed = random.uniform(8, 15)
         flow_status = "stop_and_go"
         congestion = random.uniform(0.7, 0.9)
@@ -159,39 +239,67 @@ def get_segment_speed_data(segment_id: str) -> dict:
         "congestion_level": round(congestion, 3),
         "flow_status": flow_status,
         "vehicle_density": "high" if congestion > 0.5 else "moderate" if congestion > 0.2 else "low",
+        "incident_affected": incident_match is not None,
     }
 
 
 def _generate_segment_traffic(segment_id: str, segment: dict) -> dict:
-    """Generate traffic data for a single segment based on scenario."""
+    """Generate traffic data for a single segment based on scenario and incidents."""
     speed_limit = segment.get("speed_limit", 50)
 
-    if _active_scenario == "degraded" and segment_id in ("seg_04", "seg_05"):
-        # Heavy congestion on specific segments
+    # Check if an incident targets this segment
+    incident_match = None
+    for inc in _active_incidents:
+        if inc.get("segment_id") == segment_id:
+            incident_match = inc
+            break
+
+    if incident_match:
+        # Direct incident on this segment — severe impact
+        congestion = incident_match.get("congestion", random.uniform(0.7, 0.9))
+        speed = min(incident_match.get("speed_kmh", 10), speed_limit * (1 - congestion * 0.8))
+        status_str = "incident"
+        incident_type = incident_match.get("type", "unknown")
+    elif _active_incidents and _active_scenario == "degraded":
+        # Nearby segments affected by spill-over congestion
+        congestion = random.uniform(0.25, 0.45)
+        speed = speed_limit * (1 - congestion * 0.6)
+        status_str = "slow"
+        incident_type = None
+    elif _active_scenario == "degraded" and segment_id in ("seg_04", "seg_05"):
+        # Legacy degraded scenario for specific segments
         congestion = random.uniform(0.7, 0.9)
         speed = speed_limit * (1 - congestion * 0.8)
-        status = "congested"
+        status_str = "congested"
+        incident_type = None
     elif _active_scenario == "degraded":
-        # Moderate impact on surrounding segments
         congestion = random.uniform(0.3, 0.5)
         speed = speed_limit * (1 - congestion * 0.6)
-        status = "slow"
+        status_str = "slow"
+        incident_type = None
     elif _active_scenario == "recovered":
         congestion = random.uniform(0.05, 0.15)
         speed = speed_limit * (1 - congestion * 0.3)
-        status = "clear"
+        status_str = "clear"
+        incident_type = None
     else:
         # Healthy default
         congestion = random.uniform(0.05, 0.15)
         speed = speed_limit * (1 - congestion * 0.3)
-        status = "clear"
+        status_str = "clear"
+        incident_type = None
 
-    return {
+    result = {
         "segment_id": segment_id,
         "segment_name": segment.get("name", segment_id),
         "congestion_level": round(congestion, 3),
         "current_speed_kmh": round(max(speed, 5), 1),
         "speed_limit_kmh": speed_limit,
-        "status": status,
+        "status": status_str,
         "delay_seconds": round(congestion * 120, 0),
+        "incident_affected": incident_match is not None,
     }
+    if incident_type:
+        result["incident_type"] = incident_type
+
+    return result

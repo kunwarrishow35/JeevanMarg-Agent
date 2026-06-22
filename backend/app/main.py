@@ -15,7 +15,7 @@ from app.config import settings
 from app.database import init_db, async_session_factory
 from app.middleware.auth import hash_password
 from app.models.user import User, UserRole
-from app.routers import auth, missions, approvals, system
+from app.routers import auth, missions, approvals, system, incidents
 from app.services.ws_manager import ws_manager
 
 # Configure logging
@@ -101,6 +101,7 @@ app.include_router(auth.router)
 app.include_router(missions.router)
 app.include_router(approvals.router)
 app.include_router(system.router)
+app.include_router(incidents.router)
 
 
 # WebSocket endpoint for real-time mission streaming

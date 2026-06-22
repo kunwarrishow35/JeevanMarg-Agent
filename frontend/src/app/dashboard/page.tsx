@@ -1,23 +1,171 @@
 'use client';
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
+import dynamic from 'next/dynamic';
 import { useAuthStore, useMissionStore } from '@/lib/store';
 import {
-  missionApi, approvalApi, systemApi, createMissionWebSocket,
-  type WSEvent, type MissionResponse,
+  missionApi, approvalApi, systemApi, incidentApi, createGlobalWebSocket,
+  type MissionResponse, type WSEvent,
 } from '@/lib/api';
-import dynamic from 'next/dynamic';
+import IncidentSimulator from '@/components/IncidentSimulator';
+import MissionTimeline from '@/components/MissionTimeline';
+import LocationInput from '@/components/LocationInput';
 
-const MapSection = dynamic(() => import('@/components/MapSection'), { ssr: false, loading: () => <div className="jm-card" style={{ minHeight: 420, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><p style={{ color: 'var(--warm-gray)' }}>Loading map...</p></div> });
+// Dynamically import map (no SSR)
+const MapSection = dynamic(() => import('@/components/MapSection'), { ssr: false });
+
+// Agent config
+const AGENTS = [
+  { name: 'emergency_coordinator', display: 'Emergency Coordinator', color: 'var(--agent-coordinator)' },
+  { name: 'route_intelligence', display: 'Route Intelligence', color: 'var(--agent-route)' },
+  { name: 'traffic_intelligence', display: 'Traffic Intelligence', color: 'var(--agent-traffic)' },
+  { name: 'trust_score', display: 'Trust Score', color: 'var(--agent-trust)' },
+  { name: 'recovery', display: 'Recovery', color: 'var(--agent-recovery)' },
+];
+
+const MCP_SERVERS = [
+  { name: 'traffic', display: 'Traffic MCP', color: 'var(--mcp-traffic)', icon: '🚦' },
+  { name: 'route', display: 'Route MCP', color: 'var(--mcp-route)', icon: '🛣️' },
+  { name: 'hospital', display: 'Hospital MCP', color: 'var(--mcp-hospital)', icon: '🏥' },
+  { name: 'trust', display: 'Trust MCP', color: 'var(--mcp-trust)', icon: '🛡️' },
+];
+
+// Role visibility config
+function canView(role: string, feature: string): boolean {
+  const permissions: Record<string, string[]> = {
+    dispatcher: ['mission_create', 'mission_status', 'map', 'agents', 'mcp', 'incidents', 'timeline', 'trust'],
+    operator: ['mission_status', 'map', 'agents', 'approvals', 'recovery', 'incidents', 'timeline', 'trust'],
+    administrator: ['mission_create', 'mission_status', 'map', 'agents', 'mcp', 'approvals', 'recovery', 'incidents', 'timeline', 'trust', 'system'],
+  };
+  return permissions[role]?.includes(feature) ?? false;
+}
+
+function getRoleBadgeClass(role: string): string {
+  if (role === 'dispatcher') return 'jm-role-badge jm-role-dispatcher';
+  if (role === 'operator') return 'jm-role-badge jm-role-operator';
+  if (role === 'administrator') return 'jm-role-badge jm-role-administrator';
+  return 'jm-role-badge';
+}
+
+function TrustScoreGauge({ score, level }: { score: number | null; level: string | null }) {
+  const [displayScore, setDisplayScore] = useState<number>(0);
+
+  useEffect(() => {
+    if (score === null) {
+      setDisplayScore(0);
+      return;
+    }
+
+    const start = displayScore;
+    const end = Math.round(score);
+    if (start === end) return;
+
+    const duration = 1500; // 1.5 seconds
+    const startTime = performance.now();
+    let frameId: number;
+
+    const animate = (time: number) => {
+      const elapsed = time - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      // easeOutQuad
+      const ease = progress * (2 - progress);
+      const current = Math.round(start + (end - start) * ease);
+      setDisplayScore(current);
+
+      if (progress < 1) {
+        frameId = requestAnimationFrame(animate);
+      }
+    };
+
+    frameId = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(frameId);
+  }, [score]);
+
+  // Derive status/color from the active animated score
+  const trustColor = displayScore >= 90 ? 'var(--trust-excellent)'
+    : displayScore >= 70 ? 'var(--trust-healthy)'
+    : displayScore >= 50 ? 'var(--trust-warning)'
+    : displayScore > 0 ? 'var(--trust-critical)'
+    : 'var(--warm-gray)';
+
+  return (
+    <div
+      className="jm-trust-gauge"
+      style={{
+        background: `conic-gradient(${trustColor} ${displayScore * 3.6}deg, var(--light-sage) 0deg)`,
+        transition: 'none'
+      }}
+    >
+      <div className="jm-trust-gauge-inner">
+        <div className="jm-trust-score-value" style={{ color: trustColor }}>
+          {score !== null ? displayScore : '—'}
+        </div>
+        <div className="jm-trust-score-label" style={{ color: trustColor }}>
+          {level || 'N/A'}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MissionSuccessBanner({ approvedApproval }: { approvedApproval: any }) {
+  const trustBefore = approvedApproval?.trust_score_before ?? 64;
+  const trustAfter = approvedApproval?.trust_score_after ?? 95;
+  const etaBefore = approvedApproval?.eta_before ?? 18.7;
+  const etaAfter = approvedApproval?.eta_after ?? 13.8;
+
+  return (
+    <div className="jm-success-banner">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span style={{ fontSize: 32 }}>🎉</span>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: 'white' }}>Emergency Corridor Successfully Recovered</h2>
+          <p style={{ margin: '4px 0 0 0', fontSize: 12, opacity: 0.9, color: 'white' }}>
+            The corridor has been stabilized and rerouted to bypass active traffic bottleneck segments.
+          </p>
+        </div>
+      </div>
+      
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+        <div className="jm-success-metric-card">
+          <div style={{ fontSize: 9, opacity: 0.8, textTransform: 'uppercase', fontWeight: 600, color: 'white' }}>Trust Score</div>
+          <div style={{ fontSize: 16, fontWeight: 700, marginTop: 2, color: 'white' }}>
+            {trustBefore} <span style={{ fontSize: 11, opacity: 0.7 }}>→</span> {trustAfter}
+          </div>
+        </div>
+
+        <div className="jm-success-metric-card">
+          <div style={{ fontSize: 9, opacity: 0.8, textTransform: 'uppercase', fontWeight: 600, color: 'white' }}>Corridor ETA</div>
+          <div style={{ fontSize: 16, fontWeight: 700, marginTop: 2, color: 'white' }}>
+            {typeof etaBefore === 'number' ? etaBefore.toFixed(1) : etaBefore}m <span style={{ fontSize: 11, opacity: 0.7 }}>→</span> {typeof etaAfter === 'number' ? etaAfter.toFixed(1) : etaAfter}m
+          </div>
+        </div>
+
+        <div className="jm-success-metric-card" style={{ background: 'white', color: 'var(--forest-green)' }}>
+          <div style={{ fontSize: 9, opacity: 0.8, textTransform: 'uppercase', fontWeight: 700 }}>Corridor Status</div>
+          <div style={{ fontSize: 11, fontWeight: 800, marginTop: 4, letterSpacing: 0.3, color: 'var(--forest-green)' }}>
+            STABILIZED
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function DashboardPage() {
   const router = useRouter();
   const { user, isAuthenticated, loadFromStorage, logout } = useAuthStore();
   const store = useMissionStore();
-  const wsRef = useRef<WebSocket | null>(null);
+
+  const [origin, setOrigin] = useState<{ name: string; lat: number; lng: number } | null>(null);
+  const [destination, setDestination] = useState<{ name: string; lat: number; lng: number } | null>(null);
+  const [creating, setCreating] = useState(false);
   const [starting, setStarting] = useState(false);
-  const activitiesEndRef = useRef<HTMLDivElement>(null);
+  const [approving, setApproving] = useState<number | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+
+  const role = user?.role || 'dispatcher';
 
   // Auth check
   useEffect(() => {
@@ -28,546 +176,634 @@ export default function DashboardPage() {
     if (!isAuthenticated) router.push('/login');
   }, [isAuthenticated, router]);
 
-  // Load system health on mount
-  useEffect(() => {
-    systemApi.getHealth().then((health) => {
-      store.setAgentStates(health.agents);
-      store.setMCPServerStates(health.mcp_servers);
-      store.setSystemStatus(health.system_status);
-    }).catch(() => {});
-    // Load existing approvals
-    approvalApi.list().then(store.setApprovals).catch(() => {});
+  // WebSocket handler
+  const handleWSEvent = useCallback((event: WSEvent) => {
+    const state = useMissionStore.getState();
+    const missionId = event.mission_id;
+    if (missionId && (!state.currentMission || state.currentMission.id !== missionId)) {
+      // Auto-load details of new mission in realtime
+      missionApi.get(missionId).then((m) => {
+        state.setCurrentMission(m);
+        state.setIsRunning(m.status !== 'completed' && m.status !== 'failed');
+        
+        missionApi.getRoutes(missionId).then(routes => state.setRoutes(routes)).catch(() => {});
+        missionApi.getActivities(missionId).then(acts => state.setActivities(acts)).catch(() => {});
+        missionApi.getMCPCalls(missionId).then(calls => state.setMCPCalls(calls)).catch(() => {});
+        approvalApi.list().then(approvals => {
+          state.setApprovals(approvals.filter(a => a.mission_id === missionId));
+        }).catch(() => {});
+        incidentApi.list(undefined, missionId).then(res => {
+          state.setIncidents(res.incidents);
+        }).catch(() => {});
+      }).catch(() => {});
+    }
+
+    state.handleWSEvent(event);
+
+    // Query routes on demand when generated or approved
+    const activeMissionId = missionId || state.currentMission?.id;
+    if (activeMissionId) {
+      if (
+        event.type === 'route_generated' ||
+        (event.type === 'agent_completed' && event.agent_name === 'route_intelligence') ||
+        event.type === 'recovery_recommended' ||
+        (event.type === 'approval_resolved' && event.action === 'approved')
+      ) {
+        missionApi.getRoutes(activeMissionId).then(routes => state.setRoutes(routes)).catch(() => {});
+      }
+    }
   }, []);
 
-  // Auto-scroll activities
+  // Connect WebSocket to global stream on mount
+  const connectWS = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+    wsRef.current = createGlobalWebSocket(handleWSEvent);
+  }, [handleWSEvent]);
+
+  // Load system health & synchronize active mission
   useEffect(() => {
-    activitiesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [store.activities]);
+    systemApi.getHealth().then((health) => {
+      const state = useMissionStore.getState();
+      state.setAgentStates(health.agents);
+      state.setMCPServerStates(health.mcp_servers);
+      state.setSystemStatus(health.system_status);
 
-  // WebSocket connection
-  const connectWS = useCallback((missionId: number) => {
-    if (wsRef.current) wsRef.current.close();
-    wsRef.current = createMissionWebSocket(
-      missionId,
-      (event: WSEvent) => store.handleWSEvent(event),
-      () => console.error('WS error'),
-      () => console.log('WS closed'),
-    );
-  }, [store]);
+      if (health.active_mission) {
+        const activeMission = health.active_mission;
+        state.setCurrentMission(activeMission);
+        state.setIsRunning(activeMission.status !== 'completed' && activeMission.status !== 'failed');
 
-  // Start mission
-  const handleStartMission = async () => {
-    setStarting(true);
-    store.reset();
+        if (activeMission.origin_lat && activeMission.origin_lng) {
+          setOrigin({
+            name: activeMission.origin_name,
+            lat: activeMission.origin_lat,
+            lng: activeMission.origin_lng,
+          });
+        }
+        if (activeMission.destination_lat && activeMission.destination_lng) {
+          setDestination({
+            name: activeMission.destination_name,
+            lat: activeMission.destination_lat,
+            lng: activeMission.destination_lng,
+          });
+        }
 
+        const mid = activeMission.id;
+        missionApi.getRoutes(mid).then(routes => state.setRoutes(routes)).catch(() => {});
+        missionApi.getActivities(mid).then(acts => state.setActivities(acts)).catch(() => {});
+        missionApi.getMCPCalls(mid).then(calls => state.setMCPCalls(calls)).catch(() => {});
+        approvalApi.list().then(approvals => {
+          state.setApprovals(approvals.filter(a => a.mission_id === mid));
+        }).catch(() => {});
+        incidentApi.list(undefined, mid).then(res => {
+          state.setIncidents(res.incidents);
+        }).catch(() => {});
+
+        if (activeMission.trust_score !== null) {
+          state.updateTrustScore(
+            activeMission.trust_score,
+            activeMission.trust_level || 'healthy',
+            activeMission.corridor_health || 100,
+            activeMission.eta_confidence || 100,
+            {
+              congestion: activeMission.congestion_factor ?? 100,
+              route_stability: activeMission.route_stability_factor ?? 100,
+              traffic_volatility: activeMission.traffic_volatility_factor ?? 100,
+              corridor_continuity: activeMission.corridor_continuity_factor ?? 100,
+              eta_confidence: activeMission.eta_confidence_factor ?? 100,
+            }
+          );
+        }
+      }
+    }).catch(() => {});
+
+    connectWS();
+  }, [connectWS]);
+
+  // Create Mission
+  const handleCreateMission = async () => {
+    if (!origin || !destination) return;
+    setCreating(true);
     try {
-      // Create mission with demo coordinates
       const mission = await missionApi.create({
-        origin_name: 'Connaught Place, Delhi',
-        origin_lat: 28.6315,
-        origin_lng: 77.2167,
-        destination_name: 'AIIMS Hospital, Delhi',
-        destination_lat: 28.5672,
-        destination_lng: 77.2100,
+        origin_name: origin.name,
+        origin_lat: origin.lat,
+        origin_lng: origin.lng,
+        destination_name: destination.name,
+        destination_lat: destination.lat,
+        destination_lng: destination.lng,
       });
-
+      store.reset();
       store.setCurrentMission(mission);
+    } catch (err) {
+      console.error('Failed to create mission:', err);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  // Start Mission
+  const handleStartMission = async () => {
+    if (!store.currentMission) return;
+    setStarting(true);
+    try {
+      await missionApi.start(store.currentMission.id);
       store.setIsRunning(true);
-
-      // Connect WebSocket
-      connectWS(mission.id);
-
-      // Start mission
-      await missionApi.start(mission.id);
+      // Already connected to global websocket, no reconnect needed
     } catch (err) {
       console.error('Failed to start mission:', err);
-      store.setIsRunning(false);
     } finally {
       setStarting(false);
     }
   };
 
   // Approve/Reject
-  const handleApprove = async (approvalId: number) => {
+  const handleApproval = async (approvalId: number, action: 'approve' | 'reject') => {
+    setApproving(approvalId);
     try {
-      await approvalApi.approve(approvalId);
-      const updated = await approvalApi.list();
-      store.setApprovals(updated);
-      // Refresh mission
-      if (store.currentMission) {
-        const m = await missionApi.get(store.currentMission.id);
-        store.setCurrentMission(m);
-        if (m.trust_score) {
-          store.updateTrustScore(
-            m.trust_score,
-            m.trust_level || 'unknown',
-            m.corridor_health || 0,
-            m.eta_confidence || 0,
-            {},
-          );
-        }
+      if (action === 'approve') {
+        await approvalApi.approve(approvalId);
+      } else {
+        await approvalApi.reject(approvalId);
       }
-    } catch (err) { console.error(err); }
+      store.updateApproval(approvalId, action === 'approve' ? 'approved' : 'rejected');
+    } catch (err) {
+      console.error(`Failed to ${action}:`, err);
+    } finally {
+      setApproving(null);
+    }
   };
 
-  const handleReject = async (approvalId: number) => {
-    try {
-      await approvalApi.reject(approvalId);
-      const updated = await approvalApi.list();
-      store.setApprovals(updated);
-    } catch (err) { console.error(err); }
-  };
-
-  const agentColor = (name: string): string => {
-    const colors: Record<string, string> = {
-      emergency_coordinator: 'var(--agent-coordinator)',
-      route_intelligence: 'var(--agent-route)',
-      traffic_intelligence: 'var(--agent-traffic)',
-      trust_score: 'var(--agent-trust)',
-      recovery: 'var(--agent-recovery)',
-      system: 'var(--warm-gray)',
+  // Cleanup
+  useEffect(() => {
+    return () => {
+      wsRef.current?.close();
     };
-    return colors[name] || 'var(--sage-green)';
-  };
+  }, []);
 
-  const trustColor = (level: string | null): string => {
-    const colors: Record<string, string> = {
-      excellent: 'var(--trust-excellent)',
-      healthy: 'var(--trust-healthy)',
-      warning: 'var(--trust-warning)',
-      critical: 'var(--trust-critical)',
-    };
-    return colors[level || ''] || 'var(--warm-gray)';
-  };
+  if (!isAuthenticated || !user) return null;
 
-  const stateColor = (state: string): string => {
-    const colors: Record<string, string> = {
-      idle: 'var(--warm-gray)',
-      running: 'var(--olive-green)',
-      waiting: 'var(--trust-warning)',
-      completed: 'var(--forest-green)',
-      failed: 'var(--trust-critical)',
-      connected: 'var(--olive-green)',
-      disconnected: 'var(--trust-critical)',
-    };
-    return colors[state] || 'var(--warm-gray)';
-  };
-
+  const mission = store.currentMission;
   const pendingApprovals = store.approvals.filter(a => a.status === 'pending');
-  const missionApprovals = store.currentMission
-    ? store.approvals.filter(a => a.mission_id === store.currentMission!.id)
-    : [];
+  const latestApproval = store.approvals.length > 0 ? store.approvals[store.approvals.length - 1] : null;
 
-  if (!isAuthenticated) return null;
+  // Trust score display
+  const trustColor = store.trustLevel === 'excellent' ? 'var(--trust-excellent)'
+    : store.trustLevel === 'healthy' ? 'var(--trust-healthy)'
+    : store.trustLevel === 'warning' ? 'var(--trust-warning)'
+    : store.trustLevel === 'critical' ? 'var(--trust-critical)'
+    : 'var(--warm-gray)';
 
   return (
     <div style={{ minHeight: '100vh', background: 'var(--soft-beige)' }}>
-      {/* Top Nav */}
+      {/* Navbar */}
       <nav style={{
-        background: 'var(--forest-green)', color: 'white', padding: '0 20px',
-        height: 56, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        background: 'var(--forest-green)',
+        color: 'white',
+        padding: '12px 24px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
         boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+        position: 'sticky',
+        top: 0,
+        zIndex: 100,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
-            <path d="M12 2L2 7l10 5 10-5-10-5z" />
-            <path d="M2 17l10 5 10-5" />
-            <path d="M2 12l10 5 10-5" />
-          </svg>
-          <span style={{ fontWeight: 700, fontSize: 18 }}>JeevanMarg</span>
-          <span style={{ fontSize: 12, opacity: 0.7, marginLeft: 8 }}>Emergency Corridor Agent</span>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-          <span style={{ fontSize: 13, opacity: 0.8 }}>
-            {user?.full_name} ({user?.role})
-          </span>
-          <button onClick={logout} className="jm-btn" style={{
-            background: 'rgba(255,255,255,0.15)', color: 'white',
-            padding: '6px 14px', fontSize: 13,
+          <div style={{
+            width: 36, height: 36, borderRadius: 10,
+            background: 'rgba(255,255,255,0.15)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
           }}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
+              <path d="M12 2L2 7l10 5 10-5-10-5z" />
+              <path d="M2 17l10 5 10-5" />
+              <path d="M2 12l10 5 10-5" />
+            </svg>
+          </div>
+          <div>
+            <span style={{ fontWeight: 700, fontSize: 18 }}>JeevanMarg</span>
+            <span style={{ fontSize: 11, opacity: 0.7, marginLeft: 8 }}>Self-Healing Emergency Corridor</span>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          {/* System Status */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+            <span className={`jm-status-dot jm-status-dot-${store.systemStatus === 'online' ? 'green' : 'red'} jm-status-dot-pulse`} />
+            System {store.systemStatus}
+          </div>
+
+          {/* Role Badge */}
+          <span className={getRoleBadgeClass(role)}>
+            {role === 'dispatcher' ? '📡' : role === 'operator' ? '🔧' : '⚙️'} {role}
+          </span>
+
+          {/* User & Logout */}
+          <span style={{ fontSize: 13 }}>{user.full_name}</span>
+          <button
+            onClick={logout}
+            style={{
+              background: 'rgba(255,255,255,0.15)',
+              border: 'none', color: 'white', padding: '6px 12px',
+              borderRadius: 6, cursor: 'pointer', fontSize: 12,
+            }}
+          >
             Sign Out
           </button>
         </div>
       </nav>
 
-      {/* Dashboard Grid */}
+      {/* Dashboard */}
       <div className="jm-dashboard-grid">
-        {/* Section 1: Mission Control Header */}
+        {/* Header: Mission Control */}
         <div className="jm-dashboard-header">
+          {mission && mission.status === 'completed' && (
+            <MissionSuccessBanner approvedApproval={latestApproval} />
+          )}
+
           <div className="jm-card" style={{ padding: '16px 20px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 16 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 24 }}>
-                {/* System Status */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span className={`jm-status-dot ${store.systemStatus === 'online' ? 'jm-status-dot-green jm-status-dot-pulse' : 'jm-status-dot-yellow'}`} />
-                  <span style={{ fontSize: 13, fontWeight: 600 }}>
-                    System: {store.systemStatus.toUpperCase()}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+              {/* Location inputs */}
+              {canView(role, 'mission_create') && (
+                <>
+                  <LocationInput
+                    label="Origin"
+                    icon="📍"
+                    placeholder="Search origin location..."
+                    value={origin}
+                    onChange={setOrigin}
+                  />
+                  <span style={{ fontSize: 20, color: 'var(--sage-green)' }}>→</span>
+                  <LocationInput
+                    label="Destination"
+                    icon="🏥"
+                    placeholder="Search destination..."
+                    value={destination}
+                    onChange={setDestination}
+                  />
+                  <button
+                    className="jm-btn jm-btn-primary"
+                    onClick={handleCreateMission}
+                    disabled={!origin || !destination || creating}
+                    style={{ whiteSpace: 'nowrap' }}
+                  >
+                    {creating ? '⏳ Creating...' : '📋 Create Mission'}
+                  </button>
+                </>
+              )}
+
+              {/* Start button */}
+              {mission && mission.status === 'created' && canView(role, 'mission_create') && (
+                <button
+                  className="jm-btn jm-btn-success"
+                  onClick={handleStartMission}
+                  disabled={starting || store.isRunning}
+                  style={{ whiteSpace: 'nowrap' }}
+                >
+                  {starting ? '⏳ Starting...' : '🚀 Start Mission'}
+                </button>
+              )}
+
+              {/* Mission Status */}
+              {mission && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginLeft: 'auto' }}>
+                  <span className="jm-badge jm-badge-green" style={{ fontSize: 11 }}>
+                    {mission.mission_code}
+                  </span>
+                  <span className={`jm-badge ${
+                    mission.status === 'completed' ? 'jm-badge-green' :
+                    mission.status === 'degraded' || mission.status === 'failed' ? 'jm-badge-critical' :
+                    mission.status === 'awaiting_approval' ? 'jm-badge-warning' :
+                    'jm-badge-olive'
+                  }`}>
+                    {mission.status === 'completed' ? 'MISSION STABILIZED' : mission.status.replace(/_/g, ' ').toUpperCase()}
                   </span>
                 </div>
-
-                {/* Agent Status */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ fontSize: 12, color: 'var(--warm-gray)' }}>Agents:</span>
-                  {store.agentStates.map(a => (
-                    <span key={a.name} title={`${a.display_name}: ${a.state}`}
-                      className="jm-status-dot" style={{ background: stateColor(a.state) }} />
-                  ))}
-                </div>
-
-                {/* MCP Status */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ fontSize: 12, color: 'var(--warm-gray)' }}>MCP:</span>
-                  {store.mcpServerStates.map(s => (
-                    <span key={s.name} title={`${s.display_name}: ${s.status}`}
-                      className="jm-status-dot" style={{ background: stateColor(s.status) }} />
-                  ))}
-                </div>
-
-                {/* Mission */}
-                {store.currentMission && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span className={`jm-badge ${store.currentMission.status === 'completed' ? 'jm-badge-green' : store.currentMission.status === 'running' ? 'jm-badge-olive' : store.currentMission.status === 'degraded' || store.currentMission.status === 'awaiting_approval' ? 'jm-badge-warning' : 'jm-badge-gray'}`}>
-                      {store.currentMission.mission_code} • {store.currentMission.status}
-                    </span>
-                  </div>
-                )}
-              </div>
-
-              {/* Start Mission Button */}
-              <button
-                onClick={handleStartMission}
-                disabled={starting || store.isRunning}
-                className="jm-btn jm-btn-primary jm-btn-lg"
-                style={{ minWidth: 220 }}
-              >
-                {starting ? '⏳ Creating Mission...' : store.isRunning ? '🔄 Mission Running...' : '🚑 Start Emergency Mission'}
-              </button>
+              )}
             </div>
           </div>
         </div>
 
-        {/* Section 2: Map */}
+        {/* Map */}
         <div className="jm-dashboard-map">
           <MapSection
             routes={store.routes}
-            origin={store.currentMission ? { lat: store.currentMission.origin_lat, lng: store.currentMission.origin_lng, name: store.currentMission.origin_name } : undefined}
-            destination={store.currentMission ? { lat: store.currentMission.destination_lat, lng: store.currentMission.destination_lng, name: store.currentMission.destination_name } : undefined}
+            origin={origin || (mission ? { lat: mission.origin_lat, lng: mission.origin_lng, name: mission.origin_name } : undefined)}
+            destination={destination || (mission ? { lat: mission.destination_lat, lng: mission.destination_lng, name: mission.destination_name } : undefined)}
+            incidents={store.incidents}
+            missionStatus={mission?.status}
+            trustScore={store.trustScore}
+            approvalStatus={latestApproval?.status}
           />
         </div>
 
         {/* Sidebar */}
         <div className="jm-dashboard-sidebar">
-          {/* Section 3: Trust Score Panel */}
-          <div className="jm-card">
-            <div className="jm-card-header">
-              <span className="jm-card-title">🛡️ Corridor Trust Score</span>
-              {store.trustLevel && (
-                <span className={`jm-badge ${store.trustLevel === 'excellent' ? 'jm-badge-green' : store.trustLevel === 'healthy' ? 'jm-badge-olive' : store.trustLevel === 'warning' ? 'jm-badge-warning' : 'jm-badge-critical'}`}>
-                  {store.trustLevel}
-                </span>
-              )}
-            </div>
-
-            {/* Gauge */}
-            <div className="jm-trust-gauge" style={{
-              background: `conic-gradient(${trustColor(store.trustLevel)} ${(store.trustScore || 0) * 3.6}deg, var(--light-sage) 0deg)`,
-            }}>
-              <div className="jm-trust-gauge-inner">
-                <span className="jm-trust-score-value" style={{ color: trustColor(store.trustLevel) }}>
-                  {store.trustScore !== null ? Math.round(store.trustScore) : '--'}
-                </span>
-                <span className="jm-trust-score-label" style={{ color: trustColor(store.trustLevel) }}>
-                  {store.trustLevel || 'Awaiting'}
-                </span>
+          {/* Trust Score Gauge */}
+          {canView(role, 'trust') && (
+            <div className="jm-card" style={{ textAlign: 'center' }}>
+              <div className="jm-card-header">
+                <span className="jm-card-title">🛡️ Corridor Trust Score</span>
               </div>
-            </div>
+              <TrustScoreGauge score={store.trustScore} level={store.trustLevel} />
 
-            {/* Metrics */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 16 }}>
-              <div style={{ textAlign: 'center', padding: 8, background: 'var(--light-sage)', borderRadius: 8 }}>
-                <div style={{ fontSize: 11, color: 'var(--warm-gray)' }}>Corridor Health</div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--forest-green)' }}>
-                  {store.corridorHealth !== null ? `${Math.round(store.corridorHealth)}%` : '--'}
-                </div>
-              </div>
-              <div style={{ textAlign: 'center', padding: 8, background: 'var(--light-sage)', borderRadius: 8 }}>
-                <div style={{ fontSize: 11, color: 'var(--warm-gray)' }}>ETA Confidence</div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--forest-green)' }}>
-                  {store.etaConfidence !== null ? `${Math.round(store.etaConfidence)}%` : '--'}
-                </div>
-              </div>
-            </div>
-
-            {/* Factor Bars */}
-            {Object.keys(store.trustFactors).length > 0 && (
-              <div style={{ marginTop: 16 }}>
-                <div style={{ fontSize: 11, color: 'var(--warm-gray)', marginBottom: 8, textTransform: 'uppercase' }}>Factor Breakdown</div>
-                {Object.entries(store.trustFactors).map(([key, value]) => (
-                  <div key={key} style={{ marginBottom: 6 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}>
-                      <span style={{ color: 'var(--earth-brown)', textTransform: 'capitalize' }}>{key.replace(/_/g, ' ')}</span>
-                      <span style={{ fontWeight: 600, color: 'var(--forest-green)' }}>{Math.round(value)}%</span>
-                    </div>
-                    <div className="jm-progress">
-                      <div className="jm-progress-bar" style={{
-                        width: `${value}%`,
-                        background: value >= 70 ? 'var(--olive-green)' : value >= 50 ? 'var(--trust-warning)' : 'var(--trust-critical)',
-                      }} />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Section 8: System Health */}
-          <div className="jm-card">
-            <div className="jm-card-header">
-              <span className="jm-card-title">⚙️ System Health</span>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {store.agentStates.map(a => (
-                <div key={a.name} style={{
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                  padding: '8px 12px', background: 'var(--light-sage)', borderRadius: 8,
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span className="jm-status-dot" style={{ background: stateColor(a.state) }} />
-                    <span style={{ fontSize: 12, fontWeight: 500 }}>{a.display_name}</span>
-                  </div>
-                  <span className={`jm-badge ${a.state === 'completed' ? 'jm-badge-green' : a.state === 'running' ? 'jm-badge-olive' : a.state === 'failed' ? 'jm-badge-critical' : 'jm-badge-gray'}`}
-                    style={{ fontSize: 10, padding: '2px 8px' }}>
-                    {a.state}
-                  </span>
-                </div>
-              ))}
-              <div style={{ marginTop: 8, fontSize: 11, color: 'var(--warm-gray)', textTransform: 'uppercase' }}>MCP Servers</div>
-              {store.mcpServerStates.map(s => (
-                <div key={s.name} style={{
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                  padding: '6px 12px', background: 'var(--light-sage)', borderRadius: 8,
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span className="jm-status-dot" style={{ background: stateColor(s.status) }} />
-                    <span style={{ fontSize: 12 }}>{s.display_name}</span>
-                  </div>
-                  <span style={{ fontSize: 11, color: 'var(--warm-gray)' }}>{s.tools_count} tools</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* Bottom sections */}
-        <div className="jm-dashboard-bottom-left">
-          {/* Section 4: Agent Activity Timeline */}
-          <div className="jm-card" style={{ maxHeight: 400, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-            <div className="jm-card-header">
-              <span className="jm-card-title">🤖 Agent Activity</span>
-              <span className="jm-badge jm-badge-gray">{store.activities.length}</span>
-            </div>
-            <div style={{ overflowY: 'auto', flex: 1 }}>
-              {store.activities.length === 0 ? (
-                <p style={{ color: 'var(--warm-gray)', fontSize: 13, textAlign: 'center', padding: 20 }}>
-                  Start a mission to see agent activity
-                </p>
-              ) : (
-                <div className="jm-timeline">
-                  {store.activities.map((a, i) => (
-                    <div key={`${a.id}-${i}`} className="jm-timeline-item animate-slide-in">
-                      <div className="jm-timeline-dot" style={{ background: agentColor(a.agent_name) }} />
-                      <div style={{ fontSize: 10, color: 'var(--warm-gray)', marginBottom: 2 }}>
-                        {a.timestamp ? new Date(a.timestamp).toLocaleTimeString() : '--'}
+              {/* Factor breakdown */}
+              {Object.keys(store.trustFactors).length > 0 && (
+                <div style={{ marginTop: 16, textAlign: 'left' }}>
+                  {Object.entries(store.trustFactors).map(([key, val]) => (
+                    <div key={key} style={{ marginBottom: 8 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 3 }}>
+                        <span style={{ color: 'var(--earth-brown)', textTransform: 'capitalize' }}>
+                          {key.replace(/_/g, ' ')}
+                        </span>
+                        <span style={{ fontWeight: 600, color: val < 50 ? 'var(--trust-critical)' : 'var(--forest-green)' }}>
+                          {Math.round(val)}%
+                        </span>
                       </div>
-                      <div style={{ fontSize: 12, fontWeight: 600, color: agentColor(a.agent_name), marginBottom: 2 }}>
-                        {a.agent_name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                      <div className="jm-progress">
+                        <div className="jm-progress-bar" style={{
+                          width: `${val}%`,
+                          background: val >= 70 ? 'var(--olive-green)' : val >= 50 ? 'var(--trust-warning)' : 'var(--trust-critical)',
+                        }} />
                       </div>
-                      <div style={{ fontSize: 12, color: 'var(--forest-green)' }}>{a.action}</div>
-                      {a.result && (
-                        <div style={{ fontSize: 11, color: 'var(--earth-brown)', marginTop: 2, fontStyle: 'italic' }}>
-                          {a.result.substring(0, 150)}{a.result.length > 150 ? '...' : ''}
-                        </div>
-                      )}
-                      {a.reasoning && (
-                        <div style={{ fontSize: 11, color: 'var(--warm-gray)', marginTop: 2, padding: '4px 8px', background: 'var(--light-sage)', borderRadius: 4 }}>
-                          💭 {a.reasoning.substring(0, 200)}{a.reasoning.length > 200 ? '...' : ''}
-                        </div>
-                      )}
                     </div>
                   ))}
-                  <div ref={activitiesEndRef} />
                 </div>
               )}
             </div>
-          </div>
+          )}
 
-          {/* Section 5: MCP Activity Monitor */}
-          <div className="jm-card" style={{ maxHeight: 400, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-            <div className="jm-card-header">
-              <span className="jm-card-title">🔌 MCP Activity</span>
-              <span className="jm-badge jm-badge-gray">{store.mcpCalls.length}</span>
+          {/* Incident Simulator */}
+          {canView(role, 'incidents') && (
+            <IncidentSimulator />
+          )}
+
+          {/* System Health */}
+          {canView(role, 'system') && (
+            <div className="jm-card">
+              <div className="jm-card-header">
+                <span className="jm-card-title">⚡ System Health</span>
+                <span className={`jm-badge ${store.systemStatus === 'online' ? 'jm-badge-green' : 'jm-badge-critical'}`}>
+                  {store.systemStatus}
+                </span>
+              </div>
+
+              <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--earth-brown)', marginBottom: 6, textTransform: 'uppercase' }}>
+                Agents
+              </div>
+              {AGENTS.map(a => {
+                const agentState = store.agentStates.find(s => s.name === a.name);
+                const state = agentState?.state || 'idle';
+                return (
+                  <div key={a.name} style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    padding: '6px 0', fontSize: 12,
+                  }}>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ width: 8, height: 8, borderRadius: '50%', background: a.color, display: 'inline-block' }} />
+                      {a.display}
+                    </span>
+                    <span className={`jm-badge ${state === 'running' ? 'jm-badge-olive' : state === 'completed' ? 'jm-badge-green' : state === 'failed' ? 'jm-badge-critical' : 'jm-badge-gray'}`}
+                      style={{ fontSize: 10, padding: '2px 6px' }}>
+                      {state}
+                    </span>
+                  </div>
+                );
+              })}
+
+              <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--earth-brown)', margin: '12px 0 6px', textTransform: 'uppercase' }}>
+                MCP Servers
+              </div>
+              {MCP_SERVERS.map(s => {
+                const serverState = store.mcpServerStates.find(ms => ms.name === s.name);
+                const status = serverState?.status || 'disconnected';
+                return (
+                  <div key={s.name} style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    padding: '4px 0', fontSize: 12,
+                  }}>
+                    <span>{s.icon} {s.display}</span>
+                    <span className={`jm-badge ${status === 'connected' ? 'jm-badge-green' : 'jm-badge-gray'}`}
+                      style={{ fontSize: 10, padding: '2px 6px' }}>
+                      {status}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
-            <div style={{ overflowY: 'auto', flex: 1 }}>
-              {store.mcpCalls.length === 0 ? (
-                <p style={{ color: 'var(--warm-gray)', fontSize: 13, textAlign: 'center', padding: 20 }}>
-                  MCP calls will appear here during mission execution
-                </p>
-              ) : (
+          )}
+        </div>
+
+        {/* Bottom Left: Timeline + Agent Activity */}
+        <div className="jm-dashboard-bottom-left">
+          {/* Mission Timeline */}
+          {canView(role, 'timeline') && <MissionTimeline />}
+
+          {/* Agent Activity */}
+          {canView(role, 'agents') && (
+            <div className="jm-card" style={{ maxHeight: 500, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+              <div className="jm-card-header">
+                <span className="jm-card-title">🤖 Agent Activity</span>
+                <span className="jm-badge jm-badge-gray">{store.activities.length}</span>
+              </div>
+              <div style={{ overflowY: 'auto', flex: 1 }}>
+                <div className="jm-timeline">
+                  {store.activities.slice().reverse().slice(0, 30).map((activity, i) => {
+                    const agent = AGENTS.find(a => a.name === activity.agent_name);
+                    const color = agent?.color || 'var(--warm-gray)';
+                    return (
+                      <div key={activity.id || i} className="jm-timeline-item">
+                        <div className="jm-timeline-dot" style={{ background: color }} />
+                        <div style={{ fontSize: 12, fontWeight: 600, color }}>
+                          {agent?.display || activity.agent_name}
+                        </div>
+                        <div style={{ fontSize: 12, color: 'var(--forest-green)', marginTop: 2 }}>
+                          {activity.action}
+                        </div>
+                        {activity.result && (
+                          <div style={{ fontSize: 11, color: 'var(--earth-brown)', marginTop: 2 }}>
+                            {activity.result}
+                          </div>
+                        )}
+                        {activity.reasoning && (
+                          <div style={{ fontSize: 11, color: 'var(--warm-gray)', marginTop: 2, fontStyle: 'italic' }}>
+                            {activity.reasoning.length > 200
+                              ? activity.reasoning.substring(0, 200) + '...'
+                              : activity.reasoning}
+                          </div>
+                        )}
+                        {activity.timestamp && (
+                          <div style={{ fontSize: 10, color: 'var(--warm-gray)', marginTop: 3 }}>
+                            {new Date(activity.timestamp).toLocaleTimeString()}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {store.activities.length === 0 && (
+                    <p style={{ color: 'var(--warm-gray)', fontSize: 12, textAlign: 'center', padding: 20 }}>
+                      Start a mission to see agent activity
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Bottom Full: Recovery + MCP + Approvals */}
+        <div className="jm-dashboard-bottom-full">
+          {/* MCP Activity */}
+          {canView(role, 'mcp') && (
+            <div className="jm-card" style={{ maxHeight: 400, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+              <div className="jm-card-header">
+                <span className="jm-card-title">🔧 MCP Tool Calls</span>
+                <span className="jm-badge jm-badge-gray">{store.mcpCalls.length}</span>
+              </div>
+              <div style={{ overflowY: 'auto', flex: 1 }}>
                 <table className="jm-table">
                   <thead>
                     <tr>
                       <th>Server</th>
                       <th>Tool</th>
                       <th>Latency</th>
+                      <th>Status</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {store.mcpCalls.map((c, i) => (
-                      <tr key={`${c.id}-${i}`} className="animate-slide-in">
-                        <td>
-                          <span className="jm-badge" style={{
-                            background: c.server_name === 'traffic' ? '#E8F0D8' : c.server_name === 'route' ? '#D8E8C8' : c.server_name === 'hospital' ? '#FDE8E4' : '#E8F0E0',
-                            color: c.server_name === 'hospital' ? 'var(--trust-critical)' : 'var(--forest-green)',
-                            fontSize: 10,
-                            padding: '2px 8px',
-                          }}>
-                            {c.server_name}
-                          </span>
-                        </td>
-                        <td style={{ fontSize: 12, fontFamily: 'monospace' }}>{c.tool_name}</td>
-                        <td style={{ fontSize: 12, color: 'var(--warm-gray)' }}>{c.latency_ms || 0}ms</td>
-                      </tr>
-                    ))}
+                    {store.mcpCalls.slice().reverse().slice(0, 20).map((call, i) => {
+                      const server = MCP_SERVERS.find(s => s.name === call.server_name);
+                      return (
+                        <tr key={call.id || i}>
+                          <td style={{ fontSize: 12 }}>
+                            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                              {server?.icon || '🔧'} {server?.display || call.server_name}
+                            </span>
+                          </td>
+                          <td style={{ fontSize: 12, fontFamily: 'monospace' }}>{call.tool_name}</td>
+                          <td style={{ fontSize: 12 }}>{call.latency_ms || '—'} ms</td>
+                          <td>
+                            <span className={`jm-badge ${call.status === 'success' ? 'jm-badge-green' : 'jm-badge-critical'}`}
+                              style={{ fontSize: 10, padding: '2px 6px' }}>
+                              {call.status}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
-              )}
+                {store.mcpCalls.length === 0 && (
+                  <p style={{ color: 'var(--warm-gray)', fontSize: 12, textAlign: 'center', padding: 20 }}>
+                    No MCP calls yet
+                  </p>
+                )}
+              </div>
             </div>
-          </div>
-        </div>
+          )}
 
-        <div className="jm-dashboard-bottom-full">
-          {/* Section 6: Recovery Recommendation Center */}
-          <div className="jm-card">
-            <div className="jm-card-header">
-              <span className="jm-card-title">🔄 Recovery Recommendations</span>
-            </div>
-            {missionApprovals.length === 0 ? (
-              <p style={{ color: 'var(--warm-gray)', fontSize: 13, textAlign: 'center', padding: 20 }}>
-                Recovery recommendations will appear when corridor degrades
-              </p>
-            ) : (
-              missionApprovals.map((a, i) => (
-                <div key={`${a.id}-${i}`} className="animate-scale-in" style={{
-                  padding: 16, background: 'var(--light-sage)', borderRadius: 8, marginBottom: 12,
-                  border: a.status === 'pending' ? '2px solid var(--trust-warning)' : '1px solid var(--border-green)',
-                }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: 12 }}>
-                    <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0, color: 'var(--forest-green)' }}>
-                      {a.title}
-                    </h3>
-                    <span className={`jm-badge ${a.status === 'pending' ? 'jm-badge-warning' : a.status === 'approved' ? 'jm-badge-green' : 'jm-badge-critical'}`}>
-                      {a.status}
-                    </span>
-                  </div>
-
-                  {/* Improvement metrics */}
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                    <div style={{ padding: 10, background: 'white', borderRadius: 8, textAlign: 'center' }}>
-                      <div style={{ fontSize: 11, color: 'var(--warm-gray)' }}>Trust Score</div>
-                      <div style={{ fontSize: 16, fontWeight: 700 }}>
-                        <span style={{ color: 'var(--trust-warning)' }}>{a.trust_score_before}</span>
-                        <span style={{ margin: '0 6px', color: 'var(--warm-gray)' }}>→</span>
-                        <span style={{ color: 'var(--trust-healthy)' }}>{a.trust_score_after}</span>
-                      </div>
-                    </div>
-                    <div style={{ padding: 10, background: 'white', borderRadius: 8, textAlign: 'center' }}>
-                      <div style={{ fontSize: 11, color: 'var(--warm-gray)' }}>ETA (minutes)</div>
-                      <div style={{ fontSize: 16, fontWeight: 700 }}>
-                        <span style={{ color: 'var(--trust-warning)' }}>{a.eta_before}</span>
-                        <span style={{ margin: '0 6px', color: 'var(--warm-gray)' }}>→</span>
-                        <span style={{ color: 'var(--trust-healthy)' }}>{a.eta_after}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* AI Explanation */}
-                  {a.description && (
-                    <div style={{ fontSize: 12, color: 'var(--earth-brown)', marginBottom: 12, lineHeight: 1.5 }}>
-                      <strong>AI Analysis:</strong> {a.description}
-                    </div>
-                  )}
-
-                  {/* Action Buttons */}
-                  {a.status === 'pending' && (
-                    <div style={{ display: 'flex', gap: 8 }}>
-                      <button onClick={() => handleApprove(a.id)} className="jm-btn jm-btn-success" style={{ flex: 1 }}>
-                        ✅ Approve Route Change
-                      </button>
-                      <button onClick={() => handleReject(a.id)} className="jm-btn jm-btn-danger" style={{ flex: 1 }}>
-                        ❌ Reject
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
-
-          {/* Section 7: Human-in-the-Loop Panel */}
-          <div className="jm-card">
-            <div className="jm-card-header">
-              <span className="jm-card-title">👤 Human-in-the-Loop</span>
-              {pendingApprovals.length > 0 && (
-                <span className="jm-badge jm-badge-warning">{pendingApprovals.length} pending</span>
-              )}
-            </div>
-            {pendingApprovals.length === 0 ? (
-              <p style={{ color: 'var(--warm-gray)', fontSize: 13, textAlign: 'center', padding: 20 }}>
-                No pending approvals. The system will request human input when corridor recovery is needed.
-              </p>
-            ) : (
-              pendingApprovals.map((a, i) => (
-                <div key={`${a.id}-${i}`} style={{
-                  padding: 12, background: '#FFF8E8', borderRadius: 8, marginBottom: 8,
-                  border: '1px solid var(--trust-warning)',
-                }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--forest-green)', marginBottom: 4 }}>
-                    ⚠️ {a.title}
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--earth-brown)', marginBottom: 8 }}>
-                    {a.approval_type === 'route_change' ? 'Route change approval required' : a.approval_type}
-                  </div>
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    <button onClick={() => handleApprove(a.id)} className="jm-btn jm-btn-success" style={{ padding: '6px 14px', fontSize: 12 }}>
-                      Approve
-                    </button>
-                    <button onClick={() => handleReject(a.id)} className="jm-btn jm-btn-danger" style={{ padding: '6px 14px', fontSize: 12 }}>
-                      Reject
-                    </button>
-                  </div>
-                </div>
-              ))
-            )}
-
-            {/* Approval History */}
-            {store.approvals.filter(a => a.status !== 'pending').length > 0 && (
-              <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--light-sage)' }}>
-                <div style={{ fontSize: 11, color: 'var(--warm-gray)', marginBottom: 8, textTransform: 'uppercase' }}>History</div>
-                {store.approvals.filter(a => a.status !== 'pending').map((a, i) => (
-                  <div key={`hist-${a.id}-${i}`} style={{
-                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                    padding: '6px 10px', background: 'var(--light-sage)', borderRadius: 6, marginBottom: 4,
+          {/* Human-in-the-Loop Approvals */}
+          {(canView(role, 'approvals') || canView(role, 'recovery')) && (
+            <div className="jm-card" style={{ maxHeight: 400, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+              <div className="jm-card-header">
+                <span className="jm-card-title">🧑‍⚖️ Human-in-the-Loop</span>
+                {pendingApprovals.length > 0 && (
+                  <span className="jm-badge jm-badge-warning" style={{ animation: 'pulse-green 2s infinite' }}>
+                    {pendingApprovals.length} pending
+                  </span>
+                )}
+              </div>
+              <div style={{ overflowY: 'auto', flex: 1 }}>
+                {store.approvals.slice().reverse().map((approval, i) => (
+                  <div key={approval.id || i} className="animate-slide-in" style={{
+                    padding: 14, borderRadius: 10, marginBottom: 10,
+                    background: approval.status === 'pending' ? '#FFFBE8' : approval.status === 'approved' ? '#F0F8E8' : '#FDE8E4',
+                    border: `1px solid ${approval.status === 'pending' ? '#E6D88D' : approval.status === 'approved' ? 'var(--border-green)' : '#E8B4A8'}`,
                   }}>
-                    <span style={{ fontSize: 12, color: 'var(--forest-green)' }}>{a.title.substring(0, 40)}</span>
-                    <span className={`jm-badge ${a.status === 'approved' ? 'jm-badge-green' : 'jm-badge-critical'}`}
-                      style={{ fontSize: 10, padding: '2px 6px' }}>
-                      {a.status}
-                    </span>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--forest-green)', marginBottom: 6 }}>
+                      {approval.title}
+                    </div>
+
+                    {approval.description && (
+                      <div style={{ fontSize: 11, color: 'var(--earth-brown)', marginBottom: 8, lineHeight: 1.5 }}>
+                        {approval.description.length > 300
+                          ? approval.description.substring(0, 300) + '...'
+                          : approval.description}
+                      </div>
+                    )}
+
+                    {/* Trust score comparison */}
+                    {approval.trust_score_before !== null && approval.trust_score_after !== null && (
+                      <div style={{
+                        display: 'flex', gap: 16, marginBottom: 10,
+                        padding: '8px 12px', borderRadius: 6,
+                        background: 'rgba(255,255,255,0.7)',
+                      }}>
+                        <div style={{ flex: 1, textAlign: 'center' }}>
+                          <div style={{ fontSize: 10, color: 'var(--trust-critical)', fontWeight: 600 }}>BEFORE</div>
+                          <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--trust-critical)' }}>
+                            {Math.round(approval.trust_score_before)}
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', fontSize: 18, color: 'var(--sage-green)' }}>→</div>
+                        <div style={{ flex: 1, textAlign: 'center' }}>
+                          <div style={{ fontSize: 10, color: 'var(--trust-excellent)', fontWeight: 600 }}>AFTER</div>
+                          <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--trust-excellent)' }}>
+                            {Math.round(approval.trust_score_after)}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* ETA comparison */}
+                    {approval.eta_before !== null && approval.eta_after !== null && (
+                      <div style={{ fontSize: 11, color: 'var(--earth-brown)', marginBottom: 8 }}>
+                        ETA: {approval.eta_before} min → {approval.eta_after} min
+                      </div>
+                    )}
+
+                    {/* Action buttons */}
+                    {approval.status === 'pending' && canView(role, 'approvals') && (
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button
+                          className="jm-btn jm-btn-success"
+                          style={{ flex: 1, padding: '8px 12px', fontSize: 12 }}
+                          disabled={approving === approval.id}
+                          onClick={() => handleApproval(approval.id, 'approve')}
+                        >
+                          {approving === approval.id ? '...' : '✅ Approve'}
+                        </button>
+                        <button
+                          className="jm-btn jm-btn-danger"
+                          style={{ flex: 1, padding: '8px 12px', fontSize: 12 }}
+                          disabled={approving === approval.id}
+                          onClick={() => handleApproval(approval.id, 'reject')}
+                        >
+                          ❌ Reject
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Status badges */}
+                    {approval.status !== 'pending' && (
+                      <span className={`jm-badge ${approval.status === 'approved' ? 'jm-badge-green' : 'jm-badge-critical'}`}>
+                        {approval.status === 'approved' ? '✅ Approved' : '❌ Rejected'}
+                      </span>
+                    )}
                   </div>
                 ))}
+
+                {store.approvals.length === 0 && (
+                  <p style={{ color: 'var(--warm-gray)', fontSize: 12, textAlign: 'center', padding: 20 }}>
+                    No approval requests yet
+                  </p>
+                )}
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

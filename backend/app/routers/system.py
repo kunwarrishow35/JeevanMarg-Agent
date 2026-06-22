@@ -3,8 +3,12 @@
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from sqlalchemy import select, desc
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.database import get_db
+from app.models.mission import Mission
 from app.schemas.mission import (
     SystemHealthResponse,
     AgentStatusResponse,
@@ -52,7 +56,7 @@ def update_mcp_last_call(server_name: str) -> None:
 
 
 @router.get("/health", response_model=SystemHealthResponse)
-async def get_system_health():
+async def get_system_health(db: AsyncSession = Depends(get_db)):
     """Get full system health: agents, MCP servers, and active mission status."""
     agents = [
         AgentStatusResponse(
@@ -87,8 +91,15 @@ async def get_system_health():
     else:
         system_status = "degraded"
 
+    # Query active/latest mission
+    result = await db.execute(
+        select(Mission).order_by(desc(Mission.created_at)).limit(1)
+    )
+    active_mission = result.scalar_one_or_none()
+
     return SystemHealthResponse(
         system_status=system_status,
         agents=agents,
         mcp_servers=mcp_servers,
+        active_mission=active_mission,
     )

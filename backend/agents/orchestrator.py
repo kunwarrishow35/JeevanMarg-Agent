@@ -111,7 +111,7 @@ class MissionOrchestrator:
         scenario: str,
     ) -> dict:
         """Run a single scenario phase of the mission."""
-        from data.traffic_sim import set_traffic_scenario
+        from data.traffic_sim import set_traffic_scenario, get_active_incidents
 
         # Set the traffic scenario
         set_traffic_scenario(scenario)
@@ -272,6 +272,8 @@ class MissionOrchestrator:
             route_data = await self._direct_route_call(origin, destination, mission_id)
             eta_data = {"eta_minutes": route_data.get("base_eta_minutes", 14), "confidence": 0.85}
 
+        seg_count = len(route_data.get('segments', []))
+        seg_names = ', '.join(s.get('name', s.get('id', '?')) for s in route_data.get('segments', [])[:4])
         await self._emit_event("agent_completed", {
             "mission_id": mission_id,
             "agent_name": "route_intelligence",
@@ -279,9 +281,11 @@ class MissionOrchestrator:
             "result": f"Route: {route_data.get('route_name', 'Primary Route')} | "
                      f"Distance: {route_data.get('distance_km', 0)} km | "
                      f"ETA: {eta_data.get('eta_minutes', 'N/A')} min",
-            "reasoning": f"Generated primary route with {len(route_data.get('segments', []))} segments. "
-                        f"Total distance {route_data.get('distance_km', 0)} km with base ETA of "
-                        f"{eta_data.get('eta_minutes', 'N/A')} minutes.",
+            "reasoning": f"Generated primary route with {seg_count} segments through {seg_names}. "
+                        f"Total distance {route_data.get('distance_km', 0)} km. "
+                        f"Base ETA {eta_data.get('eta_minutes', 'N/A')} minutes at "
+                        f"{eta_data.get('effective_speed_kmh', 40)} km/h effective speed. "
+                        f"Route confidence: {eta_data.get('confidence', 0.75)*100:.0f}%.",
         })
 
         return {**route_data, "eta": eta_data}
@@ -383,16 +387,47 @@ class MissionOrchestrator:
             logger.warning(f"ADK traffic agent error, using direct MCP: {e}")
             traffic_data = await self._direct_traffic_call(segments, mission_id)
 
+        # Build detailed reasoning from actual segment data
+        seg_details = traffic_data.get('segments', [])
+        bottleneck_count = traffic_data.get('corridor_assessment', {}).get('bottleneck_count', 0)
+        worst_seg_id = traffic_data.get('corridor_assessment', {}).get('worst_segment')
+        avg_cong = traffic_data.get('average_congestion', 0)
+
+        # Find incident-affected segments for specific reasoning
+        from data.traffic_sim import get_active_incidents
+        active_incidents = get_active_incidents()
+        incident_detail = ""
+        if active_incidents:
+            inc = active_incidents[0]
+            affected_seg = next((s for s in seg_details if s.get('segment_id') == inc.get('segment_id')), None)
+            if affected_seg:
+                incident_detail = (
+                    f"Detected {inc.get('type', 'incident').replace('_', ' ')} at {affected_seg.get('segment_name', affected_seg.get('segment_id'))}. "
+                    f"{inc.get('affected_lanes', 0)} of {inc.get('total_lanes', 4)} lanes blocked. "
+                    f"Average speed reduced from {affected_seg.get('speed_limit_kmh', 50)} km/h to "
+                    f"{affected_seg.get('current_speed_kmh', 10)} km/h. "
+                )
+
+        # Find worst segment details
+        worst_seg_detail = ""
+        if worst_seg_id:
+            worst = next((s for s in seg_details if s.get('segment_id') == worst_seg_id), None)
+            if worst:
+                worst_seg_detail = f"Worst segment: {worst.get('segment_name', worst_seg_id)} at {worst.get('congestion_level', 0):.0%} congestion ({worst.get('current_speed_kmh', 0)} km/h). "
+
         await self._emit_event("agent_completed", {
             "mission_id": mission_id,
             "agent_name": "traffic_intelligence",
             "action": "Traffic analysis complete",
             "result": f"Overall: {traffic_data.get('overall_status', 'unknown')} | "
-                     f"Avg Congestion: {traffic_data.get('average_congestion', 0):.1%} | "
-                     f"Bottlenecks: {traffic_data.get('corridor_assessment', {}).get('bottleneck_count', 0)}",
-            "reasoning": f"Analyzed {len(traffic_data.get('segments', []))} route segments. "
-                        f"Overall traffic status is '{traffic_data.get('overall_status', 'unknown')}'. "
-                        f"{'Detected bottleneck segments requiring attention.' if traffic_data.get('corridor_assessment', {}).get('bottleneck_count', 0) > 0 else 'No significant bottlenecks detected.'}",
+                     f"Avg Congestion: {avg_cong:.1%} | "
+                     f"Bottlenecks: {bottleneck_count}",
+            "reasoning": f"{incident_detail}"
+                        f"Analyzed {len(seg_details)} route segments. "
+                        f"Overall corridor status: '{traffic_data.get('overall_status', 'unknown')}' with "
+                        f"{avg_cong:.0%} average congestion. "
+                        f"{worst_seg_detail}"
+                        f"{'⚠️ ' + str(bottleneck_count) + ' bottleneck segment(s) detected requiring immediate attention.' if bottleneck_count > 0 else '✅ No significant bottlenecks detected.'}",
         })
 
         return traffic_data
@@ -519,6 +554,7 @@ class MissionOrchestrator:
             )
 
         trust_score = trust_data.get("trust_score", 0)
+        factors = trust_data.get("factors", {})
 
         await self._emit_event("trust_score_updated", {
             "mission_id": mission_id,
@@ -526,8 +562,25 @@ class MissionOrchestrator:
             "trust_level": trust_data.get("trust_level", "unknown"),
             "corridor_health": trust_data.get("corridor_health", 0),
             "eta_confidence": trust_data.get("eta_confidence", 0),
-            "factors": trust_data.get("factors", {}),
+            "factors": factors,
         })
+
+        # Build detailed trust reasoning with specific factor values
+        cong_pct = factors.get('congestion', 0)
+        stab_pct = factors.get('route_stability', 0)
+        vol_pct = factors.get('traffic_volatility', 0)
+        cont_pct = factors.get('corridor_continuity', 0)
+
+        # Identify which factors are dragging the score down
+        low_factors = []
+        if cong_pct < 50: low_factors.append(f"congestion at {cong_pct:.0f}%")
+        if stab_pct < 50: low_factors.append(f"route stability at {stab_pct:.0f}%")
+        if vol_pct < 50: low_factors.append(f"traffic volatility at {vol_pct:.0f}%")
+        if cont_pct < 50: low_factors.append(f"corridor continuity at {cont_pct:.0f}%")
+
+        factor_detail = ""
+        if low_factors:
+            factor_detail = f"Critical factors: {', '.join(low_factors)}. "
 
         await self._emit_event("agent_completed", {
             "mission_id": mission_id,
@@ -535,8 +588,11 @@ class MissionOrchestrator:
             "action": "Trust score calculated",
             "result": f"Trust Score: {trust_score} ({trust_data.get('trust_level', 'unknown')}) | "
                      f"Corridor Health: {trust_data.get('corridor_health', 0)}%",
-            "reasoning": f"Computed weighted trust score of {trust_score}/100. "
-                        f"Level: {trust_data.get('trust_level', 'unknown')}. "
+            "reasoning": f"Computed corridor trust score of {trust_score}/100 (level: {trust_data.get('trust_level', 'unknown')}). "
+                        f"Congestion factor: {cong_pct:.0f}%, Route stability: {stab_pct:.0f}%, "
+                        f"Traffic volatility: {vol_pct:.0f}%, Corridor continuity: {cont_pct:.0f}%, "
+                        f"ETA confidence: {factors.get('eta_confidence', 0):.0f}%. "
+                        f"{factor_detail}"
                         f"{trust_data.get('recommendation', '')}",
         })
 
@@ -671,6 +727,27 @@ class MissionOrchestrator:
         original_eta = trust_result.get("eta_confidence", 50) / 100 * 22  # approx
         new_eta = alt_route_data.get("base_eta_minutes", 12)
 
+        # Build detailed congested segment names for explanation
+        congested_seg_names = []
+        for seg_id in congested_segments:
+            for s in traffic_result.get("segments", []):
+                if s.get("segment_id") == seg_id:
+                    congested_seg_names.append(s.get("segment_name", seg_id))
+                    break
+            else:
+                congested_seg_names.append(seg_id)
+
+        # Get incident context for richer explanation
+        from data.traffic_sim import get_active_incidents
+        active_incidents = get_active_incidents()
+        incident_context = ""
+        if active_incidents:
+            inc = active_incidents[0]
+            incident_context = (
+                f"caused by {inc.get('type', 'incident').replace('_', ' ')} "
+                f"({inc.get('affected_lanes', 0)} of {inc.get('total_lanes', 4)} lanes blocked) "
+            )
+
         recovery_recommendation = {
             "alternative_route": alt_route_data,
             "nearby_hospitals": hospital_data,
@@ -679,13 +756,16 @@ class MissionOrchestrator:
             "eta_before": round(original_eta, 1),
             "eta_after": new_eta,
             "congested_segments_avoided": congested_segments,
+            "congested_segment_names": congested_seg_names,
             "ai_explanation": (
-                f"The primary corridor through {', '.join(s for s in congested_segments)} has degraded "
+                f"The primary corridor through {', '.join(congested_seg_names)} has degraded "
+                f"{incident_context}"
                 f"with a trust score of {trust_result.get('trust_score', 50)}/100. "
-                f"An alternative route via {alt_route_data.get('route_name', 'Ring Road')} has been generated, "
-                f"avoiding the congested segments. This route is expected to improve the trust score to "
-                f"{improved_trust_score}/100 and reduce ETA from ~{round(original_eta, 0)} min to {new_eta} min. "
-                f"The alternative route uses wider roads with lower congestion risk. "
+                f"Generated alternative route via {alt_route_data.get('route_name', 'Bypass Corridor')} "
+                f"avoiding {len(congested_segments)} affected segment(s). "
+                f"Expected trust score recovery from {trust_result.get('trust_score', 50)} to {improved_trust_score}/100. "
+                f"ETA improvement from ~{round(original_eta, 0)} min to {new_eta} min. "
+                f"The alternative uses wider {alt_route_data.get('distance_km', 0)} km route with lower congestion risk. "
                 f"Human approval is required to switch routes."
             ),
         }
@@ -710,12 +790,14 @@ class MissionOrchestrator:
             "mission_id": mission_id,
             "agent_name": "recovery",
             "action": "Recovery plan generated",
-            "result": f"Alternative: {alt_route_data.get('route_name', 'Ring Road Route')} | "
+            "result": f"Alternative: {alt_route_data.get('route_name', 'Bypass Route')} | "
                      f"Trust: {trust_result.get('trust_score', 50)} → {improved_trust_score} | "
                      f"ETA: {round(original_eta, 0)} → {new_eta} min",
-            "reasoning": f"Generated alternative route avoiding {len(congested_segments)} congested segments. "
-                        f"Expected trust score improvement from {trust_result.get('trust_score', 50)} to "
-                        f"{improved_trust_score}. Awaiting human approval to switch routes.",
+            "reasoning": f"Generated alternative route avoiding {len(congested_segments)} congested segment(s) "
+                        f"({', '.join(congested_seg_names)}). "
+                        f"Expected trust score recovery from {trust_result.get('trust_score', 50)} to {improved_trust_score}. "
+                        f"New route distance: {alt_route_data.get('distance_km', 0)} km with ETA of {new_eta} min. "
+                        f"Awaiting human approval to switch routes.",
         })
 
         return recovery_recommendation
@@ -730,7 +812,7 @@ class MissionOrchestrator:
             from data.route_sim import generate_route_data
             origin = {"lat": origin_lat, "lng": origin_lng, "name": origin_name}
             destination = {"lat": destination_lat, "lng": destination_lng, "name": destination_name}
-            return generate_route_data(origin, destination, route_key="connaught_to_aiims")
+            return generate_route_data(origin, destination, route_key=None)
         return generate_route
 
     def _make_route_eta_tool(self):
@@ -831,7 +913,7 @@ class MissionOrchestrator:
         """Direct call to route simulation as fallback."""
         from data.route_sim import generate_route_data
         start = time.time()
-        result = generate_route_data(origin, destination, route_key="connaught_to_aiims")
+        result = generate_route_data(origin, destination, route_key=None)
         latency = int((time.time() - start) * 1000)
         await self._emit_event("mcp_call_completed", {
             "mission_id": mission_id, "server_name": "route",
