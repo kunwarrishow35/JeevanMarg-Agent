@@ -37,6 +37,7 @@ function canView(role: string, feature: string): boolean {
     dispatcher: ['mission_create', 'mission_status', 'map', 'agents', 'mcp', 'incidents', 'timeline', 'trust'],
     operator: ['mission_status', 'map', 'agents', 'approvals', 'recovery', 'incidents', 'timeline', 'trust'],
     administrator: ['mission_create', 'mission_status', 'map', 'agents', 'mcp', 'approvals', 'recovery', 'incidents', 'timeline', 'trust', 'system'],
+    admin: ['mission_create', 'mission_status', 'map', 'agents', 'mcp', 'approvals', 'recovery', 'incidents', 'timeline', 'trust', 'system'],
   };
   return permissions[role]?.includes(feature) ?? false;
 }
@@ -44,7 +45,7 @@ function canView(role: string, feature: string): boolean {
 function getRoleBadgeClass(role: string): string {
   if (role === 'dispatcher') return 'jm-role-badge jm-role-dispatcher';
   if (role === 'operator') return 'jm-role-badge jm-role-operator';
-  if (role === 'administrator') return 'jm-role-badge jm-role-administrator';
+  if (role === 'administrator' || role === 'admin') return 'jm-role-badge jm-role-administrator';
   return 'jm-role-badge';
 }
 
@@ -176,6 +177,24 @@ export default function DashboardPage() {
     if (!isAuthenticated) router.push('/login');
   }, [isAuthenticated, router]);
 
+  // Dynamic Route Fetching with detailed frontend logging
+  const fetchRoutesAndLog = useCallback((missionId: number) => {
+    console.log(`[Frontend] Fetching routes for mission ID ${missionId}...`);
+    return missionApi.getRoutes(missionId)
+      .then((routes) => {
+        console.log(`[Frontend] Route API response received:`, routes);
+        console.log(`[Frontend] Route count returned: ${routes.length}`);
+        routes.forEach((r, i) => {
+          console.log(`[Frontend] Route #${i+1} (${r.route_type}): Waypoints count = ${r.waypoints?.length || 0}, Source = ${r.route_source || 'Synthetic Fallback'}`);
+        });
+        return routes;
+      })
+      .catch((err) => {
+        console.error(`[Frontend] Route loading failure for mission ID ${missionId}:`, err);
+        throw err;
+      });
+  }, []);
+
   // WebSocket handler
   const handleWSEvent = useCallback((event: WSEvent) => {
     const state = useMissionStore.getState();
@@ -184,9 +203,9 @@ export default function DashboardPage() {
       // Auto-load details of new mission in realtime
       missionApi.get(missionId).then((m) => {
         state.setCurrentMission(m);
-        state.setIsRunning(m.status !== 'completed' && m.status !== 'failed');
+        state.setIsRunning(m.status !== 'created' && m.status !== 'completed' && m.status !== 'failed');
         
-        missionApi.getRoutes(missionId).then(routes => state.setRoutes(routes)).catch(() => {});
+        fetchRoutesAndLog(missionId).then(routes => state.setRoutes(routes)).catch(() => {});
         missionApi.getActivities(missionId).then(acts => state.setActivities(acts)).catch(() => {});
         missionApi.getMCPCalls(missionId).then(calls => state.setMCPCalls(calls)).catch(() => {});
         approvalApi.list().then(approvals => {
@@ -209,7 +228,22 @@ export default function DashboardPage() {
         event.type === 'recovery_recommended' ||
         (event.type === 'approval_resolved' && event.action === 'approved')
       ) {
-        missionApi.getRoutes(activeMissionId).then(routes => state.setRoutes(routes)).catch(() => {});
+        fetchRoutesAndLog(activeMissionId).then(routes => state.setRoutes(routes)).catch(() => {});
+      }
+
+      // Sync current mission status in real-time
+      if (
+        event.type === 'incident_created' ||
+        event.type === 'approval_requested' ||
+        event.type === 'approval_resolved' ||
+        event.type === 'mission_completed' ||
+        event.type === 'mission_failed' ||
+        event.type === 'trust_score_updated'
+      ) {
+        missionApi.get(activeMissionId).then((m) => {
+          state.setCurrentMission(m);
+          state.setIsRunning(m.status !== 'created' && m.status !== 'completed' && m.status !== 'failed');
+        }).catch(() => {});
       }
     }
   }, []);
@@ -233,7 +267,7 @@ export default function DashboardPage() {
       if (health.active_mission) {
         const activeMission = health.active_mission;
         state.setCurrentMission(activeMission);
-        state.setIsRunning(activeMission.status !== 'completed' && activeMission.status !== 'failed');
+        state.setIsRunning(activeMission.status !== 'created' && activeMission.status !== 'completed' && activeMission.status !== 'failed');
 
         if (activeMission.origin_lat && activeMission.origin_lng) {
           setOrigin({
@@ -251,7 +285,7 @@ export default function DashboardPage() {
         }
 
         const mid = activeMission.id;
-        missionApi.getRoutes(mid).then(routes => state.setRoutes(routes)).catch(() => {});
+        fetchRoutesAndLog(mid).then(routes => state.setRoutes(routes)).catch(() => {});
         missionApi.getActivities(mid).then(acts => state.setActivities(acts)).catch(() => {});
         missionApi.getMCPCalls(mid).then(calls => state.setMCPCalls(calls)).catch(() => {});
         approvalApi.list().then(approvals => {
@@ -297,6 +331,20 @@ export default function DashboardPage() {
       });
       store.reset();
       store.setCurrentMission(mission);
+      
+      // Proactively fetch routes and associated mission data to avoid race conditions
+      console.log(`[Frontend] Mission created. Immediately fetching routes for mission ${mission.id}`);
+      const routes = await fetchRoutesAndLog(mission.id);
+      store.setRoutes(routes);
+      
+      const acts = await missionApi.getActivities(mission.id);
+      store.setActivities(acts);
+      
+      const calls = await missionApi.getMCPCalls(mission.id);
+      store.setMCPCalls(calls);
+      
+      const res = await incidentApi.list(undefined, mission.id);
+      store.setIncidents(res.incidents);
     } catch (err) {
       console.error('Failed to create mission:', err);
     } finally {
@@ -460,11 +508,38 @@ export default function DashboardPage() {
                 <button
                   className="jm-btn jm-btn-success"
                   onClick={handleStartMission}
-                  disabled={starting || store.isRunning}
+                  disabled={starting || store.isRunning || !store.routes.some(r => r.route_type === 'primary')}
                   style={{ whiteSpace: 'nowrap' }}
                 >
                   {starting ? '⏳ Starting...' : '🚀 Start Mission'}
                 </button>
+              )}
+
+              {/* Approve/Reject Route buttons in header for Operator & Admin */}
+              {mission && mission.status === 'awaiting_approval' && canView(role, 'approvals') && (
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginLeft: 16 }}>
+                  {store.approvals.filter(a => a.status === 'pending').map(approval => (
+                    <div key={approval.id} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <span style={{ fontSize: 11, color: 'var(--earth-brown)', fontWeight: 700 }}>ROUTE CHANGE:</span>
+                      <button
+                        className="jm-btn jm-btn-success"
+                        style={{ padding: '6px 12px', fontSize: 11, height: '32px' }}
+                        disabled={approving === approval.id}
+                        onClick={() => handleApproval(approval.id, 'approve')}
+                      >
+                        {approving === approval.id ? '...' : '✅ Approve'}
+                      </button>
+                      <button
+                        className="jm-btn jm-btn-danger"
+                        style={{ padding: '6px 12px', fontSize: 11, height: '32px' }}
+                        disabled={approving === approval.id}
+                        onClick={() => handleApproval(approval.id, 'reject')}
+                      >
+                        ❌ Reject
+                      </button>
+                    </div>
+                  ))}
+                </div>
               )}
 
               {/* Mission Status */}
@@ -497,6 +572,9 @@ export default function DashboardPage() {
             missionStatus={mission?.status}
             trustScore={store.trustScore}
             approvalStatus={latestApproval?.status}
+            role={role}
+            onApproveReject={handleApproval}
+            isApproving={approving}
           />
         </div>
 
@@ -717,8 +795,8 @@ export default function DashboardPage() {
                 )}
               </div>
               <div style={{ overflowY: 'auto', flex: 1 }}>
-                {store.approvals.slice().reverse().map((approval, i) => (
-                  <div key={approval.id || i} className="animate-slide-in" style={{
+                {store.approvals.slice().reverse().map((approval) => (
+                  <div key={approval.id} className="animate-slide-in" style={{
                     padding: 14, borderRadius: 10, marginBottom: 10,
                     background: approval.status === 'pending' ? '#FFFBE8' : approval.status === 'approved' ? '#F0F8E8' : '#FDE8E4',
                     border: `1px solid ${approval.status === 'pending' ? '#E6D88D' : approval.status === 'approved' ? 'var(--border-green)' : '#E8B4A8'}`,

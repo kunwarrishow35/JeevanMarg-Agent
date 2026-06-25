@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db, async_session_factory
 from app.middleware.auth import get_current_user, require_operator
 from app.models.user import User
-from app.models.mission import Approval, ApprovalStatus, Mission, MissionStatus
+from app.models.mission import Approval, ApprovalStatus, Mission, MissionStatus, RouteData
 from app.schemas.mission import ApprovalResponse, ApprovalAction
 from app.services.ws_manager import ws_manager
 
@@ -83,6 +83,19 @@ async def approve_recommendation(
             mission.eta_minutes = approval.eta_after
         mission.status = MissionStatus.COMPLETED
         mission.scenario = "recovered"
+
+    # Update route active states (set alternative active, primary inactive)
+    from sqlalchemy import update
+    await db.execute(
+        update(RouteData)
+        .where(RouteData.mission_id == approval.mission_id, RouteData.route_type == "alternative")
+        .values(is_active=1)
+    )
+    await db.execute(
+        update(RouteData)
+        .where(RouteData.mission_id == approval.mission_id, RouteData.route_type == "primary")
+        .values(is_active=0)
+    )
 
     await db.commit()
     await db.refresh(approval)

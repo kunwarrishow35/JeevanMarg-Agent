@@ -144,4 +144,5 @@ class RouteData(Base):
     distance_km = Column(Float, nullable=True)
     eta_minutes = Column(Float, nullable=True)
     is_active = Column(Integer, default=1)
+    route_source = Column(String(50), nullable=True, default="Synthetic")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

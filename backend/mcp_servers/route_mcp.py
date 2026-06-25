@@ -42,7 +42,9 @@ def generate_route(origin_lat: float, origin_lng: float, origin_name: str,
 
     origin = {"lat": origin_lat, "lng": origin_lng, "name": origin_name}
     destination = {"lat": destination_lat, "lng": destination_lng, "name": destination_name}
-    result = generate_route_data(origin, destination, route_key="connaught_to_aiims")
+    is_cp_aiims = (abs(origin_lat - 28.6315) < 0.01 and abs(destination_lat - 28.5672) < 0.01)
+    route_key = "connaught_to_aiims" if is_cp_aiims else None
+    result = generate_route_data(origin, destination, route_key=route_key)
     return json.dumps(result, indent=2)
 
 

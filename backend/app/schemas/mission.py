@@ -131,6 +131,7 @@ class RouteDataResponse(BaseModel):
     distance_km: Optional[float] = None
     eta_minutes: Optional[float] = None
     is_active: bool
+    route_source: Optional[str] = "Synthetic"
     created_at: Optional[datetime] = None
 
     class Config:

@@ -115,6 +115,7 @@ export interface RouteDataResponse {
   distance_km: number | null;
   eta_minutes: number | null;
   is_active: boolean;
+  route_source?: string;
   created_at: string | null;
 }
 
@@ -230,6 +231,15 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
       ...(options.headers || {}),
     },
   });
+
+  if (res.status === 401 && !path.includes('/auth/login')) {
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('jm_token');
+      localStorage.removeItem('jm_user');
+      window.location.href = '/login';
+      return new Promise<never>(() => {});
+    }
+  }
 
   if (!res.ok) {
     const error = await res.json().catch(() => ({ detail: res.statusText }));

@@ -74,6 +74,9 @@ interface MapSectionProps {
   missionStatus?: string | null;
   trustScore?: number | null;
   approvalStatus?: string; // 'pending' | 'approved' | 'rejected' | null
+  role?: string;
+  onApproveReject?: (approvalId: number, action: 'approve' | 'reject') => void;
+  isApproving?: number | null;
 }
 
 function FitBounds({
@@ -150,11 +153,24 @@ function AnimatedAmbulance({ waypoints }: { waypoints: number[][] }) {
   );
 }
 
+function InvalidateMapSize({ isFullscreen }: { isFullscreen: boolean }) {
+  const map = useMap();
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      map.invalidateSize();
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [isFullscreen, map]);
+  return null;
+}
+
 export default function MapSection({
   routes, origin, destination,
   incidents = [], missionStatus, trustScore, approvalStatus,
+  role, onApproveReject, isApproving,
 }: MapSectionProps) {
   const defaultCenter: [number, number] = [28.6139, 77.2090]; // Delhi
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const primaryRoute = routes.find(r => r.route_type === 'primary' && r.is_active);
   const altRoute = routes.find(r => r.route_type === 'alternative');
   const store = useMissionStore();
@@ -215,7 +231,28 @@ export default function MapSection({
   const avoidedSegments = incidents.filter(i => i.status === 'active').length || 2;
 
   return (
-    <div className="jm-card" style={{ padding: 0, overflow: 'hidden', height: '100%', minHeight: 420, position: 'relative' }}>
+    <div 
+      className="jm-card" 
+      style={isFullscreen ? {
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        width: '100vw',
+        height: '100vh',
+        zIndex: 9999,
+        borderRadius: 0,
+        margin: 0,
+        padding: 0,
+        overflow: 'hidden',
+        boxShadow: 'none',
+      } : {
+        padding: 0,
+        overflow: 'hidden',
+        height: '100%',
+        minHeight: 420,
+        position: 'relative',
+      }}
+    >
       <div style={{
         padding: '12px 16px',
         borderBottom: '1px solid var(--border-green)',
@@ -227,7 +264,7 @@ export default function MapSection({
         zIndex: 10
       }}>
         <span className="jm-card-title">🗺️ Route Intelligence Map</span>
-        <div style={{ display: 'flex', gap: 12, fontSize: 11 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, fontSize: 11 }}>
           <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             <span style={{ width: 16, height: 3, background: isDegraded && !isRecovered ? '#EF4444' : '#10B981', borderRadius: 2, display: 'inline-block' }} />
             Primary{isDegraded && !isRecovered ? ' (Affected)' : ''}
@@ -243,6 +280,37 @@ export default function MapSection({
               ⚠️ {incidents.filter(i => i.status === 'active').length} incident(s)
             </span>
           )}
+          <button
+            onClick={() => setIsFullscreen(!isFullscreen)}
+            style={{
+              background: 'var(--soft-beige)',
+              border: '1.5px solid var(--border-green)',
+              borderRadius: '6px',
+              padding: '4px 8px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 4,
+              fontSize: '11px',
+              fontWeight: 600,
+              color: 'var(--forest-green)',
+              transition: 'all 0.2s ease',
+            }}
+            title={isFullscreen ? "Collapse Map" : "Expand Map"}
+          >
+            {isFullscreen ? (
+              <>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M10 14l-7 7"/></svg>
+                <span>Collapse</span>
+              </>
+            ) : (
+              <>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+                <span>Fullscreen</span>
+              </>
+            )}
+          </button>
         </div>
       </div>
 
@@ -294,6 +362,28 @@ export default function MapSection({
                 <span>🛡️</span>
                 <strong>{avoidedSegments} Segments Avoided</strong>
               </div>
+
+              {/* Map Overlay Approve/Reject buttons for Operator/Admin */}
+              {role && (role === 'operator' || role === 'administrator' || role === 'admin') && onApproveReject && latestApproval && latestApproval.status === 'pending' && (
+                <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                  <button
+                    className="jm-btn jm-btn-success"
+                    style={{ flex: 1, padding: '8px 12px', fontSize: 11, height: '32px' }}
+                    disabled={isApproving === latestApproval.id}
+                    onClick={() => onApproveReject(latestApproval.id, 'approve')}
+                  >
+                    {isApproving === latestApproval.id ? '...' : '✅ Approve'}
+                  </button>
+                  <button
+                    className="jm-btn jm-btn-danger"
+                    style={{ flex: 1, padding: '8px 12px', fontSize: 11, height: '32px' }}
+                    disabled={isApproving === latestApproval.id}
+                    onClick={() => onApproveReject(latestApproval.id, 'reject')}
+                  >
+                    ❌ Reject
+                  </button>
+                </div>
+              )}
             </>
           ) : (
             <>
@@ -329,17 +419,18 @@ export default function MapSection({
       )}
 
       <MapContainer
-        center={center}
-        zoom={13}
-        style={{ height: 'calc(100% - 80px)', width: '100%' }}
-        zoomControl={true}
-      >
-        <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        />
+          center={center}
+          zoom={13}
+          style={{ height: isFullscreen ? 'calc(100% - 85px)' : 'calc(100% - 80px)', width: '100%' }}
+          zoomControl={true}
+        >
+          <TileLayer
+            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          />
 
-        <FitBounds origin={origin} destination={destination} routes={routes} incidents={incidents} />
+          <FitBounds origin={origin} destination={destination} routes={routes} incidents={incidents} />
+          <InvalidateMapSize isFullscreen={isFullscreen} />
 
         {/* Origin Marker */}
         {origin && (
@@ -359,6 +450,7 @@ export default function MapSection({
         {primaryRoute && primaryRoute.waypoints.length > 0 && (
           <>
             <Polyline
+              key={`${primaryColor}-${primaryOpacity}`}
               positions={primaryRoute.waypoints.map(w => [w[0], w[1]] as [number, number])}
               pathOptions={{
                 color: primaryColor,
@@ -377,6 +469,7 @@ export default function MapSection({
         {altRoute && altRoute.waypoints.length > 0 && (
           <>
             <Polyline
+              key={`${altColor}-${altOpacity}-${isRecovered ? 'rec' : 'not'}`}
               positions={altRoute.waypoints.map(w => [w[0], w[1]] as [number, number])}
               pathOptions={{
                 color: altColor,
@@ -488,8 +581,8 @@ export default function MapSection({
         position: 'relative'
       }}>
         <div style={{ display: 'flex', gap: 16 }}>
-          <span>🟢 <strong>Active Route Points:</strong> {primaryRoute?.waypoints?.length || 0}</span>
-          <span>🔵 <strong>Recovery Route Points:</strong> {altRoute?.waypoints?.length || 0}</span>
+          <span>🟢 <strong>Active Route:</strong> {primaryRoute?.waypoints?.length || 0} pts ({primaryRoute?.route_source || "Synthetic Fallback"})</span>
+          <span>🔵 <strong>Recovery Route:</strong> {altRoute?.waypoints?.length || 0} pts ({altRoute?.route_source || "Synthetic Fallback"})</span>
           <span>📐 <strong>Map Bounds Points:</strong> {boundsPoints.length}</span>
         </div>
         <div style={{ fontSize: 9, opacity: 0.7, textTransform: 'uppercase', letterSpacing: 0.5 }}>

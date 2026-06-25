@@ -128,7 +128,16 @@ export const useMissionStore = create<MissionState>((set, get) => ({
         a.id === id ? { ...a, status } : a
       ),
     })),
-  addApproval: (approval) => set((s) => ({ approvals: [...s.approvals, approval] })),
+  addApproval: (approval) =>
+    set((s) => {
+      const exists = s.approvals.some((a) => a.id === approval.id);
+      if (exists) {
+        return {
+          approvals: s.approvals.map((a) => (a.id === approval.id ? approval : a)),
+        };
+      }
+      return { approvals: [...s.approvals, approval] };
+    }),
   setRoutes: (routes) => set({ routes }),
   addRoute: (route) => set((s) => ({ routes: [...s.routes, route] })),
   setAgentStates: (states) => set({ agentStates: states }),
@@ -227,34 +236,41 @@ export const useMissionStore = create<MissionState>((set, get) => ({
         break;
 
       case 'approval_requested':
-        set((s) => ({
-          approvals: [
-            ...s.approvals,
-            {
-              id: event.approval_id || Date.now(),
-              mission_id: event.mission_id || 0,
-              approval_type: event.approval_type || 'route_change',
-              title: event.title || 'Recovery Recommendation',
-              description: event.description || null,
-              recommendation: null,
-              ai_explanation: event.description || null,
-              trust_score_before: event.trust_score_before ?? null,
-              trust_score_after: event.trust_score_after ?? null,
-              eta_before: event.eta_before ?? null,
-              eta_after: event.eta_after ?? null,
-              status: 'pending',
-              reviewed_by: null,
-              reviewed_at: null,
-              created_at: now,
-            },
-          ],
-        }));
+        set((s) => {
+          const approvalId = event.approval_id || Date.now();
+          const newApproval = {
+            id: approvalId,
+            mission_id: event.mission_id || 0,
+            approval_type: event.approval_type || 'route_change',
+            title: event.title || 'Recovery Recommendation',
+            description: event.description || null,
+            recommendation: null,
+            ai_explanation: event.description || null,
+            trust_score_before: event.trust_score_before ?? null,
+            trust_score_after: event.trust_score_after ?? null,
+            eta_before: event.eta_before ?? null,
+            eta_after: event.eta_after ?? null,
+            status: 'pending',
+            reviewed_by: null,
+            reviewed_at: null,
+            created_at: now,
+          };
+          const exists = s.approvals.some((a) => a.id === approvalId);
+          if (exists) {
+            return {
+              approvals: s.approvals.map((a) => (a.id === approvalId ? newApproval : a)),
+            };
+          }
+          return {
+            approvals: [...s.approvals, newApproval],
+          };
+        });
         break;
 
       case 'approval_resolved':
         set((s) => ({
           approvals: s.approvals.map((a) =>
-            a.mission_id === event.mission_id && a.status === 'pending'
+            a.id === event.approval_id || (a.mission_id === event.mission_id && a.status === 'pending')
               ? { ...a, status: event.action === 'approved' ? 'approved' : 'rejected' }
               : a
           ),

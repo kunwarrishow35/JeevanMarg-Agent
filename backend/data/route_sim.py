@@ -2,7 +2,15 @@
 
 import math
 import random
+import urllib.request
+import urllib.error
+import json
+import logging
 from typing import Optional
+
+logger = logging.getLogger("jeevanmarg.route_sim")
+
+_ROUTE_CACHE = {}
 
 
 # Pre-defined routes (kept for backward compatibility)
@@ -139,7 +147,120 @@ def _generate_dynamic_segments(
     return segments
 
 
+def fetch_osrm_route(waypoints: list[list[float]]) -> Optional[dict]:
+    """Fetch route details from OSRM for a list of [lat, lng] coordinates.
+
+    Returns the parsed JSON response dict if successful, otherwise None.
+    """
+    if not waypoints or len(waypoints) < 2:
+        return None
+
+    # Format coordinate string as lng,lat;lng,lat...
+    coord_strings = [f"{lng},{lat}" for lat, lng in waypoints]
+    coord_str = ";".join(coord_strings)
+
+    url = f"https://router.project-osrm.org/route/v1/driving/{coord_str}?overview=full&geometries=geojson"
+    logger.info(f"[OSRM] Request URL: {url}")
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={'User-Agent': 'JeevanMarg-Route-Intelligence-Platform/1.0'}
+        )
+        with urllib.request.urlopen(req, timeout=2) as response:
+            logger.info(f"[OSRM] Response Status: {response.status}")
+            if response.status == 200:
+                data = json.loads(response.read().decode())
+                if data.get("code") == "Ok" and data.get("routes"):
+                    coords = data["routes"][0]["geometry"]["coordinates"]
+                    logger.info(f"[OSRM] Success. Coordinates returned: {len(coords)}")
+                    return data
+                else:
+                    logger.warning(f"[OSRM] Response code was not Ok or no routes: {data.get('code')}")
+            else:
+                logger.warning(f"[OSRM] Request failed with status code: {response.status}")
+    except Exception as e:
+        logger.warning(f"[OSRM] Request failed for URL {url}: {e}")
+    return None
+
+
+def parse_osrm_response(data: dict, origin: dict, destination: dict, route_name: str, segment_names: list[str]) -> dict:
+    """Parse OSRM API response and construct route data structure."""
+    route = data["routes"][0]
+    geojson_coords = route["geometry"]["coordinates"]
+    # Convert from [lng, lat] to [lat, lng]
+    waypoints = [[coord[1], coord[0]] for coord in geojson_coords]
+
+    distance_km = round(route["distance"] / 1000.0, 2)
+    base_eta_minutes = round(route["duration"] / 60.0, 1)
+
+    # Generate segment details along the waypoints
+    segments = _build_segments_from_waypoints(waypoints, segment_names)
+
+    return {
+        "route_name": route_name,
+        "waypoints": waypoints,
+        "segments": segments,
+        "distance_km": distance_km,
+        "base_eta_minutes": base_eta_minutes,
+        "origin": origin,
+        "destination": destination,
+        "route_source": "OSRM",
+    }
+
+
+def _build_segments_from_waypoints(waypoints: list[list[float]], segment_names: list[str]) -> list[dict]:
+    """Helper to partition waypoints into roughly equal segments with metadata."""
+    num_waypoints = len(waypoints)
+    if num_waypoints < 2:
+        return []
+    # We want to create around 7 segments (or up to len(segment_names))
+    num_segs = min(7, num_waypoints - 1)
+    segments = []
+    for i in range(num_segs):
+        start_idx = int(i * (num_waypoints - 1) / num_segs)
+        end_idx = int((i + 1) * (num_waypoints - 1) / num_segs)
+
+        # Calculate length of this segment
+        seg_distance = 0.0
+        for j in range(start_idx, end_idx):
+            seg_distance += _haversine_km(
+                waypoints[j][0], waypoints[j][1],
+                waypoints[j + 1][0], waypoints[j + 1][1],
+            )
+
+        name_idx = min(i, len(segment_names) - 1)
+        segments.append({
+            "id": f"seg_{i + 1:02d}",
+            "name": segment_names[name_idx],
+            "length_km": round(seg_distance, 2),
+            "lanes": random.choice([3, 4, 4, 4, 6]),
+            "speed_limit": random.choice([40, 50, 50, 60, 60]),
+        })
+    return segments
+
+
 def generate_route_data(
+    origin: dict,
+    destination: dict,
+    route_key: Optional[str] = None,
+) -> dict:
+    # Check cache first
+    cache_key = (
+        round(origin["lat"], 5),
+        round(origin["lng"], 5),
+        round(destination["lat"], 5),
+        round(destination["lng"], 5),
+        route_key
+    )
+    if cache_key in _ROUTE_CACHE:
+        logger.info(f"[Route Cache] Cache hit for primary route: {origin.get('name')} -> {destination.get('name')}")
+        return _ROUTE_CACHE[cache_key]
+
+    result = _generate_route_data_raw(origin, destination, route_key)
+    _ROUTE_CACHE[cache_key] = result
+    return result
+
+def _generate_route_data_raw(
     origin: dict,
     destination: dict,
     route_key: Optional[str] = None,
@@ -156,6 +277,18 @@ def generate_route_data(
     """
     if route_key and route_key in ROUTE_TEMPLATES:
         template = ROUTE_TEMPLATES[route_key]
+        # Attempt OSRM route for CP-AIIMS template first
+        logger.info("Attempting OSRM route for template query...")
+        try:
+            osrm_data = fetch_osrm_route([[origin["lat"], origin["lng"]], [destination["lat"], destination["lng"]]])
+            if osrm_data:
+                return parse_osrm_response(
+                    osrm_data, origin, destination,
+                    route_name=template["name"],
+                    segment_names=[s["name"] for s in template["segments"]]
+                )
+        except Exception as e:
+            logger.warning(f"OSRM template routing failed, using synthetic fallback: {e}")
         return {
             "route_name": template["name"],
             "waypoints": template["waypoints"],
@@ -164,9 +297,21 @@ def generate_route_data(
             "base_eta_minutes": template["base_eta_minutes"],
             "origin": origin,
             "destination": destination,
+            "route_source": "Synthetic Fallback",
         }
 
-    # Dynamic route generation
+    # Dynamic route generation — try OSRM first
+    route_name = f"{origin.get('name', 'Origin')} → {destination.get('name', 'Destination')} via Main Corridor"
+    logger.info("Attempting OSRM route for dynamic query...")
+    try:
+        osrm_data = fetch_osrm_route([[origin["lat"], origin["lng"]], [destination["lat"], destination["lng"]]])
+        if osrm_data:
+            return parse_osrm_response(osrm_data, origin, destination, route_name, _SEGMENT_NAMES)
+    except Exception as e:
+        logger.warning(f"OSRM dynamic primary routing failed: {e}")
+
+    # Fallback to existing synthetic routing
+    logger.info("Generating synthetic primary route fallback...")
     waypoints = _generate_dynamic_waypoints(
         origin["lat"], origin["lng"],
         destination["lat"], destination["lng"],
@@ -176,8 +321,6 @@ def generate_route_data(
     avg_speed = 35  # km/h average urban speed
     eta_minutes = round((distance_km / avg_speed) * 60, 1)
 
-    route_name = f"{origin.get('name', 'Origin')} → {destination.get('name', 'Destination')} via Main Corridor"
-
     return {
         "route_name": route_name,
         "waypoints": waypoints,
@@ -186,10 +329,32 @@ def generate_route_data(
         "base_eta_minutes": eta_minutes,
         "origin": origin,
         "destination": destination,
+        "route_source": "Synthetic Fallback",
     }
 
 
 def generate_alternative_route_data(
+    origin: dict,
+    destination: dict,
+    avoid_segments: list[str],
+) -> dict:
+    # Check cache first
+    cache_key = (
+        round(origin["lat"], 5),
+        round(origin["lng"], 5),
+        round(destination["lat"], 5),
+        round(destination["lng"], 5),
+        tuple(sorted(avoid_segments))
+    )
+    if cache_key in _ROUTE_CACHE:
+        logger.info(f"[Route Cache] Cache hit for alternative route avoiding: {avoid_segments}")
+        return _ROUTE_CACHE[cache_key]
+
+    result = _generate_alternative_route_data_raw(origin, destination, avoid_segments)
+    _ROUTE_CACHE[cache_key] = result
+    return result
+
+def _generate_alternative_route_data_raw(
     origin: dict,
     destination: dict,
     avoid_segments: list[str],
@@ -204,7 +369,42 @@ def generate_alternative_route_data(
     Returns:
         Alternative route data.
     """
-    # Check if we're using the predefined Delhi route
+    route_name = f"{origin.get('name', 'Origin')} → {destination.get('name', 'Destination')} via Bypass Corridor"
+
+    # Try OSRM routing first using a 3-point route: Origin -> Offset Bypass Midpoint -> Destination
+    mid_lat = (origin["lat"] + destination["lat"]) / 2.0
+    mid_lng = (origin["lng"] + destination["lng"]) / 2.0
+
+    d_lat = destination["lat"] - origin["lat"]
+    d_lng = destination["lng"] - origin["lng"]
+    # Perpendicular offset to push the route away from the congested primary corridor
+    perp_lat = -d_lng * 0.20
+    perp_lng = d_lat * 0.20
+
+    bypass_lat = round(mid_lat + perp_lat, 6)
+    bypass_lng = round(mid_lng + perp_lng, 6)
+
+    logger.info(f"Attempting OSRM alternative route via bypass midpoint ({bypass_lat}, {bypass_lng})...")
+    try:
+        osrm_data = fetch_osrm_route([
+            [origin["lat"], origin["lng"]],
+            [bypass_lat, bypass_lng],
+            [destination["lat"], destination["lng"]]
+        ])
+
+        if osrm_data:
+            is_delhi = (abs(origin.get("lat", 0) - 28.6315) < 0.01 and abs(destination.get("lat", 0) - 28.5672) < 0.01)
+            names = [s["name"] for s in ROUTE_TEMPLATES["connaught_to_aiims_alt"]["segments"]] if is_delhi else _ALT_SEGMENT_NAMES
+            alt_name = ROUTE_TEMPLATES["connaught_to_aiims_alt"]["name"] if is_delhi else route_name
+
+            return {
+                **parse_osrm_response(osrm_data, origin, destination, alt_name, names),
+                "avoided_segments": avoid_segments,
+            }
+    except Exception as e:
+        logger.warning(f"OSRM alternative routing failed: {e}")
+
+    # Check if we're using the predefined Delhi route for synthetic fallback
     if (abs(origin.get("lat", 0) - 28.6315) < 0.01 and
         abs(destination.get("lat", 0) - 28.5672) < 0.01):
         # Use predefined alternative template
@@ -218,9 +418,11 @@ def generate_alternative_route_data(
             "avoided_segments": avoid_segments,
             "origin": origin,
             "destination": destination,
+            "route_source": "Synthetic Fallback",
         }
 
     # Dynamic alternative route — create a wider arc path
+    logger.info("Generating synthetic alternative route fallback...")
     waypoints = _generate_dynamic_waypoints(
         origin["lat"], origin["lng"],
         destination["lat"], destination["lng"],
@@ -230,11 +432,6 @@ def generate_alternative_route_data(
 
     # Bias the arc outward (add perpendicular offset to middle waypoints)
     mid = len(waypoints) // 2
-    d_lat = destination["lat"] - origin["lat"]
-    d_lng = destination["lng"] - origin["lng"]
-    # Perpendicular direction for the arc
-    perp_lat = -d_lng * 0.15
-    perp_lng = d_lat * 0.15
     for i in range(1, len(waypoints) - 1):
         # Parabolic weighting — strongest at midpoint
         t = 1.0 - abs(i - mid) / mid
@@ -246,8 +443,6 @@ def generate_alternative_route_data(
     avg_speed = 40  # Wider roads on alternative route
     eta_minutes = round((distance_km / avg_speed) * 60, 1)
 
-    route_name = f"{origin.get('name', 'Origin')} → {destination.get('name', 'Destination')} via Bypass Corridor"
-
     return {
         "route_name": route_name,
         "waypoints": waypoints,
@@ -257,6 +452,7 @@ def generate_alternative_route_data(
         "avoided_segments": avoid_segments,
         "origin": origin,
         "destination": destination,
+        "route_source": "Synthetic Fallback",
     }
 
 

@@ -53,6 +53,49 @@ async def create_mission(
     await db.commit()
     await db.refresh(mission)
 
+    # Generate and persist primary route at mission creation
+    from data.route_sim import generate_route_data
+    from app.models.mission import RouteData
+
+    origin = {"lat": mission.origin_lat, "lng": mission.origin_lng, "name": mission.origin_name}
+    destination = {"lat": mission.destination_lat, "lng": mission.destination_lng, "name": mission.destination_name}
+    
+    is_cp_aiims = (abs(mission.origin_lat - 28.6315) < 0.01 and abs(mission.destination_lat - 28.5672) < 0.01)
+    route_key = "connaught_to_aiims" if is_cp_aiims else None
+    
+    route_res = generate_route_data(origin, destination, route_key=route_key)
+    
+    route_db = RouteData(
+        mission_id=mission.id,
+        route_type="primary",
+        route_name=route_res.get("route_name", "Primary Route"),
+        waypoints=route_res.get("waypoints", []),
+        segments=route_res.get("segments"),
+        distance_km=route_res.get("distance_km"),
+        eta_minutes=route_res.get("base_eta_minutes"),
+        is_active=1,
+        route_source=route_res.get("route_source", "Synthetic"),
+    )
+    db.add(route_db)
+    await db.commit()
+    logger.info(f"[Route Persistence] Successfully persisted primary route for mission {mission.id}. Source: {route_db.route_source}")
+
+    # Broadcast mission_created event
+    await ws_manager.broadcast_global({
+        "type": "mission_created",
+        "mission_id": mission.id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    # Broadcast route_generated event
+    await ws_manager.broadcast_global({
+        "type": "route_generated",
+        "mission_id": mission.id,
+        "route_type": "primary",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    logger.info(f"[WebSocket] Successfully broadcast route_generated event for mission {mission.id}")
+
     return MissionResponse.model_validate(mission)
 
 
@@ -300,6 +343,10 @@ async def _run_mission_background(
                     alt_route = rec.get("alternative_route", {})
                     if alt_route.get("waypoints"):
                         async with async_session_factory() as event_db:
+                            from sqlalchemy import delete
+                            await event_db.execute(
+                                delete(RouteData).where(RouteData.mission_id == mission_id, RouteData.route_type == "alternative")
+                            )
                             route = RouteData(
                                 mission_id=mission_id,
                                 route_type="alternative",
@@ -309,9 +356,11 @@ async def _run_mission_background(
                                 distance_km=alt_route.get("distance_km"),
                                 eta_minutes=alt_route.get("base_eta_minutes"),
                                 is_active=0,
+                                route_source=alt_route.get("route_source", "OSRM" if "OSRM" in alt_route.get("route_source", "") or not alt_route.get("route_source") else "Synthetic Fallback"),
                             )
                             event_db.add(route)
                             await event_db.commit()
+                            logger.info(f"[Route Persistence] Successfully persisted alternative route for mission {mission_id}. Source: {route.route_source}")
 
                 # Broadcast via WebSocket after persisting to DB to avoid races
                 await ws_manager.broadcast_to_mission(mission_id, event)
@@ -336,6 +385,10 @@ async def _run_mission_background(
                 route_data = healthy_result.get("route", {})
                 if route_data.get("waypoints"):
                     async with async_session_factory() as route_db:
+                        from sqlalchemy import delete
+                        await route_db.execute(
+                            delete(RouteData).where(RouteData.mission_id == mission_id, RouteData.route_type == "primary")
+                        )
                         route = RouteData(
                             mission_id=mission_id,
                             route_type="primary",
@@ -345,9 +398,11 @@ async def _run_mission_background(
                             distance_km=route_data.get("distance_km"),
                             eta_minutes=route_data.get("eta", {}).get("eta_minutes"),
                             is_active=1,
+                            route_source=route_data.get("route_source", "OSRM" if "OSRM" in route_data.get("route_source", "") or not route_data.get("route_source") else "Synthetic Fallback"),
                         )
                         route_db.add(route)
                         await route_db.commit()
+                        logger.info(f"[Route Persistence] Successfully persisted primary route during background run for mission {mission_id}. Source: {route.route_source}")
 
                     # Broadcast route_generated event after successful persist to DB
                     await ws_manager.broadcast_to_mission(mission_id, {
@@ -356,6 +411,7 @@ async def _run_mission_background(
                         "route_type": "primary",
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     })
+                    logger.info(f"[WebSocket] Successfully broadcast route_generated event during background run for mission {mission_id}")
 
             # Update final mission status
             async with async_session_factory() as final_db:

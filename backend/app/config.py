@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     # Demo
     DEMO_CITY: str = "Delhi"
     AUTO_PROGRESS_SCENARIOS: bool = True
+    DEMO_MODE: bool = True
+    LLM_TIMEOUT: float = 3.0
 
     @property
     def cors_origins_list(self) -> list[str]:

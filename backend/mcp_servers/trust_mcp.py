@@ -11,6 +11,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastmcp import FastMCP
+from app.config import settings
 
 mcp = FastMCP(
     name="TrustMCPServer",
@@ -100,7 +101,7 @@ def calculate_trust_score(
         "factors": {k: round(v * 100, 1) for k, v in factors.items()},
         "weights": {k: round(v * 100, 0) for k, v in WEIGHTS.items()},
         "recommendation": recommendation,
-        "requires_recovery": trust_score < 70,
+        "requires_recovery": trust_score < (65 if settings.DEMO_MODE else 70),
     }, indent=2)
 
 
@@ -119,25 +120,26 @@ def assess_reliability(trust_score: float, trend: str = "stable") -> str:
         JSON string with reliability assessment, action level, and detailed analysis.
     """
     # Determine reliability rating
+    threshold = 65 if settings.DEMO_MODE else 70
     if trust_score >= 90:
         reliability = "high"
         action_level = "none"
         analysis = "Emergency corridor is operating at peak reliability. All factors within optimal range."
-    elif trust_score >= 70:
+    elif trust_score >= threshold:
         reliability = "moderate"
         action_level = "monitor"
         analysis = "Corridor is functional but showing some stress factors. Continuous monitoring recommended."
     elif trust_score >= 50:
         reliability = "low"
         action_level = "intervene"
-        analysis = "Corridor reliability has dropped below acceptable threshold. Recovery planning should begin immediately."
+        analysis = f"Corridor reliability has dropped below acceptable threshold ({threshold}). Recovery planning should begin immediately."
     else:
         reliability = "critical"
         action_level = "emergency"
         analysis = "Corridor is unreliable for emergency transport. Alternative routing required urgently."
 
     # Adjust based on trend
-    if trend == "degrading" and trust_score < 80:
+    if trend == "degrading" and trust_score < (threshold + 10):
         action_level = "intervene" if action_level == "monitor" else action_level
         analysis += " Trend is degrading, which compounds the concern."
     elif trend == "improving" and trust_score >= 50:
