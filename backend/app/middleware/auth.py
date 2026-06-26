@@ -65,7 +65,7 @@ async def get_current_user(
 ) -> User:
     """Dependency: get the authenticated user from JWT token."""
     payload = decode_token(credentials.credentials)
-    username: str = payload.get("sub")
+    username: str | None = payload.get("sub")
     if username is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -79,7 +79,7 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found",
         )
-    if not user.is_active:
+    if not bool(user.is_active):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account is disabled",

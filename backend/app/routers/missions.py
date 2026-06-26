@@ -212,7 +212,7 @@ async def _run_mission_background(
     mission_id: int,
     origin: dict,
     destination: dict,
-    scenario_sequence: list[str] = None,
+    scenario_sequence: list[str] | None = None,
 ) -> None:
     """Background task that runs the agent orchestration."""
     from app.config import settings

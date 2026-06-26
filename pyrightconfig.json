@@ -1,0 +1,16 @@
+{
+  "venvPath": "backend",
+  "venv": ".venv",
+  "extraPaths": [
+    "backend",
+    "backend/.venv/Lib/site-packages"
+  ],
+  "reportGeneralTypeIssues": "none",
+  "reportAttributeAccessIssue": "none",
+  "reportArgumentType": "none",
+  "reportPossiblyUnboundVariable": "none",
+  "reportOperatorIssue": "none",
+  "reportInvalidTypeForm": "none",
+  "reportReturnType": "none",
+  "reportAssignmentType": "none"
+}

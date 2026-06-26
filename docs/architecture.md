@@ -11,7 +11,7 @@ This document details the high-level architecture, individual components, agent 
 The system consists of three main tiers:
 1. **Next.js 15 Frontend Dashboard**: Visualizes the corridors, active incidents, real-time agent reasoning log, and handles human-in-the-loop recovery approvals.
 2. **FastAPI Backend Services**: Orchestrates the API requests, runs simulation scenarios, manages database operations, and streams events via WebSockets.
-3. **AI Multi-Agent System & FastMCP Tool Servers**: Uses **Google ADK** (Agent Development Kit) for multi-agent reasoning, and **FastMCP** stdio-based servers for exposing routing, traffic, and trust score computation tools.
+3. **AI Multi-Agent System & FastMCP Tool Servers**: Managed by the **Google ADK Runtime** for coordinating agent execution, and **FastMCP** stdio-based servers for exposing routing, traffic, and trust score computation tools.
 
 ```mermaid
 graph TD
@@ -32,8 +32,8 @@ graph TD
         DB_SQL["database.py (SQLAlchemy & SQLite)"]
     end
 
-    %% Agent Orchestrator (Google ADK)
-    subgraph Orchestrator ["Agent Orchestration (Google ADK)"]
+    %% Agent Orchestrator (Google ADK Runtime)
+    subgraph Orchestrator ["Google ADK Runtime<br>Emergency Coordinator (Orchestrator) + Agent Runtime"]
         Coord["Emergency Coordinator Agent"]
         Route_Agent["Route Intelligence Agent"]
         Traffic_Agent["Traffic Intelligence Agent"]
@@ -42,7 +42,7 @@ graph TD
     end
 
     %% MCP Servers (FastMCP)
-    subgraph MCP_Layer ["Tool Infrastructure (FastMCP Servers)"]
+    subgraph MCP_Layer ["Tool Infrastructure (Independent FastMCP Microservices)"]
         Route_MCP["Route MCP Server"]
         Traffic_MCP["Traffic MCP Server"]
         Trust_MCP["Trust MCP Server"]
@@ -59,26 +59,39 @@ graph TD
         T_MCP_Calls["mcp_calls"]
     end
 
+    %% Deployment Badge (Bottom-Right)
+    subgraph Deployment ["Deployment Infrastructure"]
+        DeployBadge["🐳 Docker Ready<br>☁️ Google Cloud Run Compatible<br>⚙️ Environment Variables (.env)"]
+    end
+
+    %% Legend
+    subgraph Legend ["System Color Legend"]
+        L_Blue["Blue: Frontend & APIs"]
+        L_Green["Green: AI Agents"]
+        L_Orange["Orange: MCP Tool Calls / Microservices"]
+        L_Gray["Gray: Database & Infrastructure"]
+    end
+
     %% Connections
-    UI <-->|REST API / JSON| Main
-    WS_Client <-->|Real-time Events| WS_Manager
+    UI <-->|"REST API (🔐 JWT Authentication & Role-Based Access)"| Main
+    WS_Client <-->|"WebSockets (Real-time Updates)"| WS_Manager
     WS_Manager <--> Main
     Main --> Router_Missions
     Main --> Router_Approvals
     Main --> Router_Incidents
 
     Router_Missions -->|Background Task| Coord
-    Coord -->|Parallel Gather| Route_Agent
-    Coord -->|Parallel Gather| Traffic_Agent
-    Coord --> Trust_Agent
+    Coord -->|Parallel Orchestration| Route_Agent
+    Coord -->|Parallel Orchestration| Traffic_Agent
+    Coord -->|Orchestration| Trust_Agent
     Coord -->|If Trust < Threshold| Recovery_Agent
 
     %% Agent tool calls
-    Route_Agent -->|generate_route / estimate_eta| Route_MCP
-    Traffic_Agent -->|get_traffic_status / get_congestion_risk| Traffic_MCP
-    Trust_Agent -->|calculate_trust_score / assess_reliability| Trust_MCP
-    Recovery_Agent -->|generate_alternative_route| Route_MCP
-    Recovery_Agent -->|assess_reliability| Trust_MCP
+    Route_Agent ===>|"MCP Tool Invocation (FastMCP over stdio)"| Route_MCP
+    Traffic_Agent ===>|"MCP Tool Invocation (FastMCP over stdio)"| Traffic_MCP
+    Trust_Agent ===>|"MCP Tool Invocation (FastMCP over stdio)"| Trust_MCP
+    Recovery_Agent ===>|"MCP Tool Invocation (FastMCP over stdio)"| Route_MCP
+    Recovery_Agent ===>|"MCP Tool Invocation (FastMCP over stdio)"| Trust_MCP
 
     %% Database operations
     Router_Missions -->|Writes/Reads| T_Missions
@@ -92,6 +105,43 @@ graph TD
 
     %% External Interfaces
     Route_MCP -->|Routing Data| OSRM["OSRM Routing Engine"]
+
+    %% Styling
+    style Coord fill:#2e7d32,stroke:#1b5e20,stroke-width:3px,color:#fff
+    style Route_Agent fill:#4caf50,stroke:#2e7d32,color:#fff
+    style Traffic_Agent fill:#4caf50,stroke:#2e7d32,color:#fff
+    style Trust_Agent fill:#4caf50,stroke:#2e7d32,color:#fff
+    style Recovery_Agent fill:#4caf50,stroke:#2e7d32,color:#fff
+
+    style UI fill:#1565c0,stroke:#0d47a1,color:#fff
+    style Map fill:#1565c0,stroke:#0d47a1,color:#fff
+    style WS_Client fill:#1565c0,stroke:#0d47a1,color:#fff
+    style Main fill:#1976d2,stroke:#1565c0,color:#fff
+    style Router_Missions fill:#1e88e5,stroke:#1565c0,color:#fff
+    style Router_Approvals fill:#1e88e5,stroke:#1565c0,color:#fff
+    style Router_Incidents fill:#1e88e5,stroke:#1565c0,color:#fff
+    style WS_Manager fill:#1e88e5,stroke:#1565c0,color:#fff
+
+    style Route_MCP fill:#e65100,stroke:#bf360c,color:#fff
+    style Traffic_MCP fill:#e65100,stroke:#bf360c,color:#fff
+    style Trust_MCP fill:#e65100,stroke:#bf360c,color:#fff
+    style Hospital_MCP fill:#e65100,stroke:#bf360c,color:#fff
+
+    style DB_SQL fill:#37474f,stroke:#263238,color:#fff
+    style Database fill:#eceff1,stroke:#b0bec5,color:#000
+    style T_Missions fill:#546e7a,stroke:#37474f,color:#fff
+    style T_Routes fill:#546e7a,stroke:#37474f,color:#fff
+    style T_Approvals fill:#546e7a,stroke:#37474f,color:#fff
+    style T_Incidents fill:#546e7a,stroke:#37474f,color:#fff
+    style T_Activities fill:#546e7a,stroke:#37474f,color:#fff
+    style T_MCP_Calls fill:#546e7a,stroke:#37474f,color:#fff
+
+    style DeployBadge fill:#78909c,stroke:#455a64,color:#fff
+
+    style L_Blue fill:#1e88e5,stroke:#1565c0,color:#fff
+    style L_Green fill:#4caf50,stroke:#2e7d32,color:#fff
+    style L_Orange fill:#e65100,stroke:#bf360c,color:#fff
+    style L_Gray fill:#546e7a,stroke:#37474f,color:#fff
 ```
 
 ---
@@ -121,15 +171,15 @@ graph TD
   - **WebSockets Manager**: Exposes a subscription channel ([ws_manager.py](file:///c:/Users/kunwa/Desktop/JeevanMarg-Agent/backend/app/services/ws_manager.py)) to broadcast live agent and mission events directly to the frontend.
   - **Background Worker**: Offloads heavy AI multi-agent runs to background tasks, avoiding API request blockage.
 
-### 3. Agent Orchestrator: Google ADK
+### 3. Agent Runtime: Google ADK Runtime
 - **Location**: `backend/agents/` (orchestrator: [orchestrator.py](file:///c:/Users/kunwa/Desktop/JeevanMarg-Agent/backend/agents/orchestrator.py))
 - **Technologies**: Google Agent Development Kit (`google-adk`), Gemini (defaults to `gemini-2.5-flash`)
 - **Key Features**:
-  - **Emergency Coordinator Agent**: Acts as the orchestrator. Manages the scenario phases, executes specialized sub-agents, aggregates their results, and decides whether recovery actions should be taken.
-  - **Route Intelligence Agent**: Generates routes and computes ETAs. Equipped with the Route MCP tools.
-  - **Traffic Intelligence Agent**: Analyzes congestion, lanes affected, and detects bottlenecks. Equipped with Traffic MCP tools.
-  - **Trust Score Agent**: Calculates the multi-factor trust score (0–100) using a weighted analysis formula. Equipped with Trust MCP tools.
-  - **Recovery Agent**: Activated when trust falls below a warning threshold (e.g. 70). Formulates alternative corridors avoiding the congested segments and drafts human approval recommendations.
+  - **Emergency Coordinator Agent**: Acts as the central orchestrator running under the Google ADK Runtime. Manages the scenario phases, executes and coordinates the specialized specialist agents, aggregates their results, and decides whether recovery actions should be taken.
+  - **Route Intelligence Agent**: Coordinated specialist agent that generates routes and computes ETAs. Equipped with the Route MCP tools.
+  - **Traffic Intelligence Agent**: Coordinated specialist agent that analyzes congestion, lanes affected, and detects bottlenecks. Equipped with Traffic MCP tools.
+  - **Trust Score Agent**: Coordinated specialist agent that calculates the multi-factor trust score (0–100) using a weighted analysis formula. Equipped with Trust MCP tools.
+  - **Recovery Agent**: Coordinated specialist agent activated when trust falls below a warning threshold (e.g. 70). Formulates alternative corridors avoiding the congested segments and drafts human approval recommendations.
 
 ### 4. Tool Infrastructure: FastMCP Servers
 - **Location**: `backend/mcp_servers/`

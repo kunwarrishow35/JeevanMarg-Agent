@@ -68,7 +68,7 @@ class MissionOrchestrator:
         mission_id: int,
         origin: dict,
         destination: dict,
-        scenario_sequence: list[str] = None,
+        scenario_sequence: list[str] | None = None,
     ) -> dict:
         """Execute the full mission lifecycle.
 
@@ -203,7 +203,7 @@ class MissionOrchestrator:
             "recovery": recovery_result,
         }
 
-    async def _run_route_agent(self, mission_id: int, origin: dict, destination: dict, scenario: str, cached_route: dict = None) -> dict:
+    async def _run_route_agent(self, mission_id: int, origin: dict, destination: dict, scenario: str, cached_route: dict | None = None) -> dict:
         """Execute the Route Intelligence Agent via ADK with MCP tools."""
         await self._emit_event("agent_started", {
             "mission_id": mission_id,
@@ -301,6 +301,7 @@ class MissionOrchestrator:
                 )]
             )
 
+            start_time = 0.0
             async for event in runner.run_async(
                 user_id=f"mission_{mission_id}",
                 session_id=session.id,
@@ -321,7 +322,7 @@ class MissionOrchestrator:
                             })
 
                         if part.function_response:
-                            latency = int((time.time() - start_time) * 1000) if 'start_time' in dir() else 0
+                            latency = int((time.time() - start_time) * 1000) if start_time > 0 else 0
                             resp_name = part.function_response.name
                             resp_data = part.function_response.response
 
@@ -345,8 +346,8 @@ class MissionOrchestrator:
                                 "reasoning": part.text[:500],
                             })
 
+        timeout = getattr(settings, "LLM_TIMEOUT", 3.0)
         try:
-            timeout = getattr(settings, "LLM_TIMEOUT", 3.0)
             await asyncio.wait_for(run_agent_coro(), timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(f"ADK route agent timed out after {timeout} seconds, falling back to direct MCP call.")
@@ -393,7 +394,7 @@ class MissionOrchestrator:
 
         return result_dict
 
-    async def _run_traffic_agent(self, mission_id: int, route_result: dict, scenario: str) -> dict:
+    async def _run_traffic_agent(self, mission_id: int, route_result: dict | None, scenario: str) -> dict:
         """Execute the Traffic Intelligence Agent via ADK with MCP tools."""
         await self._emit_event("agent_started", {
             "mission_id": mission_id,
@@ -470,6 +471,7 @@ class MissionOrchestrator:
                 )]
             )
 
+            start_time = 0.0
             async for event in runner.run_async(
                 user_id=f"mission_{mission_id}",
                 session_id=session.id,
@@ -490,7 +492,7 @@ class MissionOrchestrator:
                             })
 
                         if part.function_response:
-                            latency = int((time.time() - start_time) * 1000) if 'start_time' in dir() else 0
+                            latency = int((time.time() - start_time) * 1000) if start_time > 0 else 0
                             resp_data = part.function_response.response
 
                             await self._emit_event("mcp_call_completed", {
@@ -511,8 +513,8 @@ class MissionOrchestrator:
                                 "reasoning": part.text[:500],
                             })
 
+        timeout = getattr(settings, "LLM_TIMEOUT", 3.0)
         try:
-            timeout = getattr(settings, "LLM_TIMEOUT", 3.0)
             await asyncio.wait_for(run_traffic_coro(), timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(f"ADK traffic agent timed out after {timeout} seconds, falling back to direct MCP call.")
@@ -731,6 +733,7 @@ class MissionOrchestrator:
                 )]
             )
 
+            start_time = 0.0
             async for event in runner.run_async(
                 user_id=f"mission_{mission_id}",
                 session_id=session.id,
@@ -751,7 +754,7 @@ class MissionOrchestrator:
                             })
 
                         if part.function_response:
-                            latency = int((time.time() - start_time) * 1000) if 'start_time' in dir() else 0
+                            latency = int((time.time() - start_time) * 1000) if start_time > 0 else 0
                             resp_data = part.function_response.response
 
                             await self._emit_event("mcp_call_completed", {
@@ -772,8 +775,8 @@ class MissionOrchestrator:
                                 "reasoning": part.text[:500],
                             })
 
+        timeout = getattr(settings, "LLM_TIMEOUT", 3.0)
         try:
-            timeout = getattr(settings, "LLM_TIMEOUT", 3.0)
             await asyncio.wait_for(run_trust_coro(), timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(f"ADK trust agent timed out after {timeout} seconds, falling back to direct MCP call.")
@@ -958,6 +961,7 @@ class MissionOrchestrator:
                 )]
             )
 
+            start_time = 0.0
             async for event in runner.run_async(
                 user_id=f"mission_{mission_id}",
                 session_id=session.id,
@@ -969,20 +973,20 @@ class MissionOrchestrator:
                             tool_name = part.function_call.name
                             tool_args = dict(part.function_call.args) if part.function_call.args else {}
                             start_time = time.time()
-                            server = "route" if "route" in tool_name else "hospital"
+                            server = "route" if tool_name and "route" in tool_name else "hospital"
 
                             await self._emit_event("mcp_call_started", {
                                 "mission_id": mission_id,
                                 "server_name": server,
-                                "tool_name": tool_name,
+                                "tool_name": tool_name if tool_name else "unknown",
                                 "request_payload": tool_args,
                             })
 
                         if part.function_response:
-                            latency = int((time.time() - start_time) * 1000) if 'start_time' in dir() else 0
+                            latency = int((time.time() - start_time) * 1000) if start_time > 0 else 0
                             resp_data = part.function_response.response
                             resp_name = part.function_response.name
-                            server = "route" if "route" in resp_name else "hospital"
+                            server = "route" if resp_name and "route" in resp_name else "hospital"
 
                             await self._emit_event("mcp_call_completed", {
                                 "mission_id": mission_id,
@@ -992,9 +996,9 @@ class MissionOrchestrator:
                                 "latency_ms": latency,
                             })
 
-                            if "route" in resp_name and isinstance(resp_data, dict):
+                            if resp_name and "route" in resp_name and isinstance(resp_data, dict):
                                 alt_route_data = resp_data
-                            elif "hospital" in resp_name and isinstance(resp_data, dict):
+                            elif resp_name and "hospital" in resp_name and isinstance(resp_data, dict):
                                 hospital_data = resp_data
 
                         if part.text:
@@ -1004,8 +1008,8 @@ class MissionOrchestrator:
                                 "reasoning": part.text[:500],
                             })
 
+        timeout = getattr(settings, "LLM_TIMEOUT", 3.0)
         try:
-            timeout = getattr(settings, "LLM_TIMEOUT", 3.0)
             await asyncio.wait_for(run_recovery_coro(), timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(f"ADK recovery agent timed out after {timeout} seconds, falling back to direct MCP call.")

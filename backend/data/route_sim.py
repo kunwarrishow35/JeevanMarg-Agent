@@ -6,15 +6,31 @@ import urllib.request
 import urllib.error
 import json
 import logging
-from typing import Optional
+from typing import Optional, TypedDict, List, Dict
 
 logger = logging.getLogger("jeevanmarg.route_sim")
 
 _ROUTE_CACHE = {}
 
 
+class RouteSegment(TypedDict):
+    id: str
+    name: str
+    length_km: float
+    lanes: int
+    speed_limit: int
+
+
+class RouteTemplate(TypedDict):
+    name: str
+    waypoints: List[List[float]]
+    segments: List[RouteSegment]
+    distance_km: float
+    base_eta_minutes: int
+
+
 # Pre-defined routes (kept for backward compatibility)
-ROUTE_TEMPLATES = {
+ROUTE_TEMPLATES: Dict[str, RouteTemplate] = {
     "connaught_to_aiims": {
         "name": "Connaught Place → AIIMS via Aurobindo Marg",
         "waypoints": [

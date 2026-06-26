@@ -13,6 +13,7 @@ from app.schemas.mission import (
     SystemHealthResponse,
     AgentStatusResponse,
     MCPServerStatusResponse,
+    MissionResponse,
 )
 
 router = APIRouter(prefix="/api/v1/system", tags=["System"])
@@ -101,5 +102,5 @@ async def get_system_health(db: AsyncSession = Depends(get_db)):
         system_status=system_status,
         agents=agents,
         mcp_servers=mcp_servers,
-        active_mission=active_mission,
+        active_mission=MissionResponse.model_validate(active_mission) if active_mission else None,
     )

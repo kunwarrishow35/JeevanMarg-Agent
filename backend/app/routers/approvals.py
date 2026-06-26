@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/v1/approvals", tags=["Approvals"])
 
 @router.get("", response_model=list[ApprovalResponse])
 async def list_approvals(
-    status_filter: str = None,
+    status_filter: str | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):

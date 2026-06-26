@@ -54,7 +54,8 @@ def run_test():
     routes = routes_res.json()
     print(f"Number of routes returned: {len(routes)}")
     for i, r in enumerate(routes):
-        print(f"Route #{i+1}: Type={r['route_type']}, Name={r['route_name']}, Waypoints={len(r['waypoints'])}, Source={r['route_source']}")
+        route_name = r['route_name'].replace("→", "->")
+        print(f"Route #{i+1}: Type={r['route_type']}, Name={route_name}, Waypoints={len(r['waypoints'])}, Source={r['route_source']}")
 
 if __name__ == "__main__":
     run_test()
