@@ -429,6 +429,7 @@ export default function MapSection({
       )}
 
       <MapContainer
+          key={routes.length === 0 && !origin && !destination ? 'empty' : 'active'}
           center={center}
           zoom={13}
           style={{ height: isFullscreen ? 'calc(100% - 85px)' : 'calc(100% - 80px)', width: '100%' }}
