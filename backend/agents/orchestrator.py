@@ -31,6 +31,14 @@ _TRAFFIC_AGENT_CACHE = {}
 _TRUST_AGENT_CACHE = {}
 _RECOVERY_AGENT_CACHE = {}
 
+def clear_agent_caches() -> None:
+    """Clear all agent caches to ensure fresh state for subsequent runs."""
+    _ROUTE_AGENT_CACHE.clear()
+    _TRAFFIC_AGENT_CACHE.clear()
+    _TRUST_AGENT_CACHE.clear()
+    _RECOVERY_AGENT_CACHE.clear()
+    logger.info("Cleared all ADK agent caches.")
+
 # Path to MCP server scripts
 MCP_SERVERS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mcp_servers")
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -120,8 +128,19 @@ class MissionOrchestrator:
         """Run a single scenario phase of the mission."""
         from data.traffic_sim import set_traffic_scenario, get_active_incidents
         from app.database import async_session_factory
-        from app.models.mission import RouteData
+        from app.models.mission import RouteData, Mission, MissionStatus
         from sqlalchemy import select
+
+        # Stop background orchestration if mission is completed
+        try:
+            async with async_session_factory() as db:
+                mission_res = await db.execute(select(Mission).where(Mission.id == mission_id))
+                m = mission_res.scalar_one_or_none()
+                if m and m.status == MissionStatus.COMPLETED:
+                    logger.info(f"Mission {mission_id} is already completed. Aborting scenario run.")
+                    return {}
+        except Exception as e:
+            logger.warning(f"Could not verify mission status: {e}")
 
         # Set the traffic scenario
         set_traffic_scenario(scenario)
@@ -173,7 +192,16 @@ class MissionOrchestrator:
         trust_score = trust_result.get("trust_score", 100)
         recovery_threshold = 65 if settings.DEMO_MODE else 70
         
-        if trust_score < recovery_threshold:
+        should_run_recovery = trust_score < recovery_threshold
+        if settings.DEMO_MODE:
+            active_incidents = get_active_incidents()
+            has_severe_incident = any(
+                inc.get("type") in ("major_accident", "road_block")
+                for inc in active_incidents
+            )
+            should_run_recovery = should_run_recovery and has_severe_incident
+            
+        if should_run_recovery:
             recovery_result = await self._run_recovery_agent(
                 mission_id, origin, destination, trust_result, traffic_result, scenario
             )

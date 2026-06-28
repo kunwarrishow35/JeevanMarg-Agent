@@ -113,18 +113,26 @@ function FitBounds({
     if (points.length > 0) {
       const bounds = L.latLngBounds(points);
       map.fitBounds(bounds, { padding: [60, 60], maxZoom: 16 });
+    } else {
+      map.setView([28.6139, 77.2090], 13);
     }
   }, [origin, destination, routes, incidents, map]);
   return null;
 }
 
 function AnimatedAmbulance({ waypoints }: { waypoints: number[][] }) {
-  const [position, setPosition] = useState<[number, number]>(
-    waypoints[0] as [number, number]
-  );
+  const [position, setPosition] = useState<[number, number] | null>(null);
   const [waypointIndex, setWaypointIndex] = useState(0);
 
   useEffect(() => {
+    if (!waypoints || waypoints.length === 0) {
+      setPosition(null);
+      setWaypointIndex(0);
+      return;
+    }
+    setPosition(waypoints[0] as [number, number]);
+    setWaypointIndex(0);
+
     if (waypoints.length < 2) return;
 
     const interval = setInterval(() => {
@@ -141,6 +149,8 @@ function AnimatedAmbulance({ waypoints }: { waypoints: number[][] }) {
 
     return () => clearInterval(interval);
   }, [waypoints]);
+
+  if (!position) return null;
 
   return (
     <Marker position={position} icon={ambulanceIcon}>

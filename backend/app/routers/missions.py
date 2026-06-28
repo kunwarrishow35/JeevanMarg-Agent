@@ -36,6 +36,12 @@ async def create_mission(
     current_user: User = Depends(require_dispatcher),
 ):
     """Create a new emergency corridor mission."""
+    # Ensure any previous mission's active state is cleared
+    from data.traffic_sim import clear_incidents
+    from agents.orchestrator import clear_agent_caches
+    clear_incidents()
+    clear_agent_caches()
+
     mission_code = f"JM-{uuid.uuid4().hex[:8].upper()}"
 
     mission = Mission(
@@ -160,6 +166,64 @@ async def start_mission(
     return {"status": "started", "mission_id": mission.id, "message": "Agent orchestration started"}
 
 
+@router.post("/{mission_id}/end")
+async def end_mission(
+    mission_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_dispatcher),
+):
+    """End a mission, mark as completed, and clear active resources/recommendations."""
+    result = await db.execute(select(Mission).where(Mission.id == mission_id))
+    mission = result.scalar_one_or_none()
+    if not mission:
+        raise HTTPException(status_code=404, detail="Mission not found")
+
+    mission.status = MissionStatus.COMPLETED
+    await db.commit()
+
+    # Clear active recovery recommendations (alternative routes and pending approvals)
+    from sqlalchemy import delete
+    await db.execute(
+        delete(RouteData).where(RouteData.mission_id == mission_id, RouteData.route_type == "alternative")
+    )
+    # Mark pending approvals as rejected/resolved
+    from app.models.mission import Approval, ApprovalStatus
+    from sqlalchemy import update
+    await db.execute(
+        update(Approval)
+        .where(Approval.mission_id == mission_id, Approval.status == ApprovalStatus.PENDING)
+        .values(status=ApprovalStatus.REJECTED)
+    )
+    await db.commit()
+
+    # Clear incidents from database and simulation
+    from app.models.incident import Incident, IncidentStatus
+    await db.execute(
+        update(Incident)
+        .where(Incident.mission_id == mission_id, Incident.status == IncidentStatus.ACTIVE)
+        .values(status=IncidentStatus.RESOLVED, resolved_at=datetime.now(timezone.utc))
+    )
+    await db.commit()
+
+    from data.traffic_sim import clear_incidents
+    clear_incidents()
+
+    from agents.orchestrator import clear_agent_caches
+    clear_agent_caches()
+
+    # Broadcast mission_completed event
+    await ws_manager.broadcast_to_mission(mission_id, {
+        "type": "mission_completed",
+        "mission_id": mission_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    # Close and remove WebSocket connections for this mission
+    await ws_manager.disconnect_all_for_mission(mission_id)
+
+    return {"status": "ended", "mission_id": mission_id, "message": "Mission ended successfully"}
+
+
 @router.get("/{mission_id}/activities", response_model=list[AgentActivityResponse])
 async def get_mission_activities(
     mission_id: int,
@@ -227,6 +291,9 @@ async def _run_mission_background(
             mission = result.scalar_one_or_none()
             if not mission:
                 logger.error(f"Mission {mission_id} not found")
+                return
+            if mission.status == MissionStatus.COMPLETED:
+                logger.info(f"Mission {mission_id} is completed. Aborting background run.")
                 return
 
             # Initialize orchestrator

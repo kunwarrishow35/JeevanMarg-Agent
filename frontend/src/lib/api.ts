@@ -281,6 +281,11 @@ export const missionApi = {
       method: 'POST',
     }),
 
+  end: (id: number) =>
+    apiFetch<{ status: string; mission_id: number }>(`/api/v1/missions/${id}/end`, {
+      method: 'POST',
+    }),
+
   getActivities: (id: number) =>
     apiFetch<AgentActivityResponse[]>(`/api/v1/missions/${id}/activities`),
 

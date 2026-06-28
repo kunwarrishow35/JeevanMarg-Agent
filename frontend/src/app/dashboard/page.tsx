@@ -159,10 +159,11 @@ export default function DashboardPage() {
   const { user, isAuthenticated, loadFromStorage, logout } = useAuthStore();
   const store = useMissionStore();
 
-  const [origin, setOrigin] = useState<{ name: string; lat: number; lng: number } | null>(null);
+const [origin, setOrigin] = useState<{ name: string; lat: number; lng: number } | null>(null);
   const [destination, setDestination] = useState<{ name: string; lat: number; lng: number } | null>(null);
   const [creating, setCreating] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [ending, setEnding] = useState(false);
   const [approving, setApproving] = useState<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -367,6 +368,27 @@ export default function DashboardPage() {
     }
   };
 
+  // End Mission
+  const handleEndMission = async () => {
+    if (!store.currentMission) return;
+    setEnding(true);
+    try {
+      await missionApi.end(store.currentMission.id);
+      store.reset();
+      setOrigin(null);
+      setDestination(null);
+      // Fetch system health to get clean system status
+      const health = await systemApi.getHealth();
+      store.setAgentStates(health.agents);
+      store.setMCPServerStates(health.mcp_servers);
+      store.setSystemStatus(health.system_status);
+    } catch (err) {
+      console.error('Failed to end mission:', err);
+    } finally {
+      setEnding(false);
+    }
+  };
+
   // Approve/Reject
   const handleApproval = async (approvalId: number, action: 'approve' | 'reject') => {
     setApproving(approvalId);
@@ -512,6 +534,18 @@ export default function DashboardPage() {
                   style={{ whiteSpace: 'nowrap' }}
                 >
                   {starting ? '⏳ Starting...' : '🚀 Start Mission'}
+                </button>
+              )}
+
+              {/* End Mission button */}
+              {mission && (
+                <button
+                  className="jm-btn jm-btn-danger"
+                  onClick={handleEndMission}
+                  disabled={ending}
+                  style={{ whiteSpace: 'nowrap' }}
+                >
+                  {ending ? '⏳ Ending...' : '🛑 End Mission'}
                 </button>
               )}
 

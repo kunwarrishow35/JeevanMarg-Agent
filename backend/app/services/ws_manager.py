@@ -61,6 +61,18 @@ class ConnectionManager:
         for mid, ws in dead_connections:
             self.disconnect(ws, mid)
 
+    async def disconnect_all_for_mission(self, mission_id: int) -> None:
+        """Close and remove all WebSocket connections for a specific mission."""
+        if mission_id in self._connections:
+            websockets = list(self._connections[mission_id])
+            for ws in websockets:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+            self._connections[mission_id] = []
+            logger.info(f"Disconnected all WebSockets for mission {mission_id}")
+
     async def broadcast_global(self, data: dict) -> None:
         """Send an event to all connected WebSocket clients."""
         message = json.dumps(data, default=str)

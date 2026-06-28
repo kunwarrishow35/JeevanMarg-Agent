@@ -92,9 +92,13 @@ async def get_system_health(db: AsyncSession = Depends(get_db)):
     else:
         system_status = "degraded"
 
-    # Query active/latest mission
+    # Query active/latest mission (excluding completed/failed)
+    from app.models.mission import MissionStatus
     result = await db.execute(
-        select(Mission).order_by(desc(Mission.created_at)).limit(1)
+        select(Mission)
+        .where(Mission.status.notin_([MissionStatus.COMPLETED, MissionStatus.FAILED]))
+        .order_by(desc(Mission.created_at))
+        .limit(1)
     )
     active_mission = result.scalar_one_or_none()
 

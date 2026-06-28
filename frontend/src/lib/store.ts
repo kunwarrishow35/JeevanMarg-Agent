@@ -382,5 +382,8 @@ export const useMissionStore = create<MissionState>((set, get) => ({
       corridorHealth: null,
       etaConfidence: null,
       trustFactors: {},
+      agentStates: [],
+      mcpServerStates: [],
+      systemStatus: 'online',
     }),
 }));

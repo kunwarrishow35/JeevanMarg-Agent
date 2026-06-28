@@ -3,6 +3,7 @@
 import random
 import logging
 from datetime import datetime, timezone
+from typing import TypedDict, Tuple, List, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy import select, desc
@@ -21,8 +22,27 @@ logger = logging.getLogger("jeevanmarg.incidents")
 
 router = APIRouter(prefix="/api/v1/incidents", tags=["Incidents"])
 
+
+class LocationProfile(TypedDict):
+    name: str
+    lat_offset: float
+    lng_offset: float
+    segment_id: str
+    segment_name: str
+
+
+class IncidentProfile(TypedDict):
+    severity: IncidentSeverity
+    affected_lanes_range: Tuple[int, int]
+    total_lanes: int
+    delay_range: Tuple[int, int]
+    speed_after_range: Tuple[int, int]
+    descriptions: List[str]
+    locations: List[LocationProfile]
+
+
 # Incident generation profiles for each type
-INCIDENT_PROFILES = {
+INCIDENT_PROFILES: Dict[str, IncidentProfile] = {
     "major_accident": {
         "severity": IncidentSeverity.HIGH,
         "affected_lanes_range": (2, 4),
@@ -134,8 +154,8 @@ def _generate_incident_data(
 
     # If mission exists, offset from mission origin; otherwise use Delhi defaults
     if mission:
-        base_lat = mission.origin_lat
-        base_lng = mission.origin_lng
+        base_lat = float(mission.origin_lat)
+        base_lng = float(mission.origin_lng)
     else:
         base_lat = 28.6315  # Default Delhi
         base_lng = 77.2167
@@ -203,6 +223,8 @@ async def simulate_incident(
         mission = result.scalar_one_or_none()
         if not mission:
             raise HTTPException(status_code=404, detail="Mission not found")
+        if mission.status == MissionStatus.COMPLETED:
+            raise HTTPException(status_code=400, detail="Cannot simulate incident on a completed mission")
 
     # Generate incident data
     incident_data = _generate_incident_data(request.incident_type, mission)
